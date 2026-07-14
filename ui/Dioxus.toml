@@ -1,0 +1,19 @@
+[application]
+name = "csv-explorer-ui"
+default_platform = "web"
+
+[web.app]
+title = "CSV Explorer"
+
+[web.watcher]
+watch_path = "./src"
+
+[web.proxy]
+url = "http://localhost:8080"
+
+[application.plugins]
+available = true
+required = []
+
+[bundle]
+icon = []

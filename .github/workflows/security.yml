@@ -1,0 +1,13 @@
+name: Security checks
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: csv-explorer/scripts/secret-scan.sh
+      - run: csv-explorer/scripts/secret-scan.sh --self-test

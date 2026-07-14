@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = ["shared", "storage", "indexer", "api", "ui"]
+
+[workspace.package]
+version = "0.1.5"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-graphql = "5.0"
+async-graphql-axum = "=5.0.6"
+async-trait = "0.1"
+axum = "0.6"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.4", features = ["derive"] }
+config = "0.13"
+dioxus = { version = "0.7", features = ["web"] }
+dioxus-desktop = "0.7"
+dioxus-web = "0.7"
+futures = "0.3"
+hex = "0.4.3"
+lazy_static = "1.4"
+prometheus = "0.13"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha3 = "0.10"
+sqlx = { version = "0.8", features = ["sqlite", "_rt-tokio", "tls-rustls", "chrono"] }
+thiserror = "1.0"
+tokio = { version = "1", features = ["rt", "macros", "time", "rt-multi-thread", "sync", "signal"] }
+toml = "0.8"
+tower = "0.4"
+tower-http = { version = "0.4", features = ["fs", "trace", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.6", features = ["v4", "serde", "js"] }
+
+[workspace.lints.clippy]
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+
+[patch.crates-io]
+spl-token-2022-interface = { path = "../../csv-protocol/third_party/spl-token-2022-interface" }

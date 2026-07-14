@@ -1,0 +1,44 @@
+{
+  "chains": {
+    "bitcoin": {
+      "primary": {
+        "url": "${BITCOIN_RPC_URL}",
+        "type": "http",
+        "priority": 1
+      },
+      "alternatives": []
+    },
+    "ethereum": {
+      "primary": {
+        "url": "${ETHEREUM_RPC_URL}",
+        "type": "http",
+        "priority": 1
+      },
+      "alternatives": []
+    },
+    "sui": {
+      "primary": {
+        "url": "${SUI_RPC_URL}",
+        "type": "http",
+        "priority": 1
+      },
+      "alternatives": []
+    },
+    "aptos": {
+      "primary": {
+        "url": "${APTOS_RPC_URL}",
+        "type": "http",
+        "priority": 1
+      },
+      "alternatives": []
+    },
+    "solana": {
+      "primary": {
+        "url": "${SOLANA_RPC_URL}",
+        "type": "http",
+        "priority": 1
+      },
+      "alternatives": []
+    }
+  }
+}

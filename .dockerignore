@@ -1,0 +1,9 @@
+.env
+.env.*
+data/
+target/
+rpc_config.json
+config.toml
+config.mainnet.toml
+config.testnet.toml
+ui/web/index.html.bak

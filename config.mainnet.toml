@@ -1,0 +1,47 @@
+[database]
+url = "sqlite://data/explorer.db"
+max_connections = 10
+
+[api]
+host = "0.0.0.0"
+port = 8080
+
+[ui]
+host = "0.0.0.0"
+port = 3000
+api_url = "https://explorer.csvprotocol.com"
+
+[indexer]
+concurrency = 4
+batch_size = 100
+poll_interval_ms = 5000
+
+[chains.bitcoin]
+enabled = false
+network = "mainnet"
+rpc_url = "https://mempool.space/api"
+start_block = 800000
+
+[chains.ethereum]
+enabled = false
+network = "mainnet"
+rpc_url = "https://eth.llamarpc.com"
+start_block = 19000000
+
+[chains.sui]
+enabled = false
+network = "mainnet"
+rpc_url = "https://fullnode.mainnet.sui.io:443"
+start_block = 50000000
+
+[chains.aptos]
+enabled = false
+network = "mainnet"
+rpc_url = "https://fullnode.mainnet.aptoslabs.com/v1"
+start_block = 200000000
+
+[chains.solana]
+enabled = false
+network = "mainnet"
+rpc_url = "https://api.mainnet-beta.solana.com"
+start_block = 250000000
