@@ -171,15 +171,15 @@ async fn fetch_seal(id: &str) -> Result<csv_explorer_shared::SealRecord, String>
         .send()
         .await
         .map_err(|e| format!("Failed to connect: {}", e))?;
-    
+
     if response.status() == 404 {
         return Err(format!("Seal {} not found", id));
     }
-    
+
     if !response.status().is_success() {
         return Err(format!("API error: {}", response.status()));
     }
-    
+
     response
         .json::<csv_explorer_shared::SealRecord>()
         .await

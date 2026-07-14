@@ -305,9 +305,9 @@ mod tests {
     use crate::chain_indexer::{AddressIndexingResult, ChainResult};
     use async_trait::async_trait;
     use csv_explorer_shared::{
-        CommitmentScheme, CsvContract, EnhancedSanadRecord,
-        EnhancedSealRecord, EnhancedTransferRecord, FinalityProofType, InclusionProofType, Network,
-        PriorityLevel, SanadRecord, SealRecord, TransferRecord,
+        CommitmentScheme, CsvContract, EnhancedSanadRecord, EnhancedSealRecord,
+        EnhancedTransferRecord, FinalityProofType, InclusionProofType, Network, PriorityLevel,
+        SanadRecord, SealRecord, TransferRecord,
     };
 
     struct MockIndexer;

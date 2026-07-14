@@ -227,11 +227,11 @@ async fn fetch_chains() -> Result<Vec<csv_explorer_shared::ChainInfo>, String> {
         .send()
         .await
         .map_err(|e| format!("Failed to connect: {}", e))?;
-    
+
     if !response.status().is_success() {
         return Err(format!("API error: {}", response.status()));
     }
-    
+
     response
         .json::<Vec<csv_explorer_shared::ChainInfo>>()
         .await

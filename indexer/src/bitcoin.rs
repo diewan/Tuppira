@@ -199,7 +199,9 @@ impl ChainIndexer for BitcoinIndexer {
             for vout in &tx.vout {
                 // Look for OP_RETURN outputs that may encode cross-chain transfer data
                 if vout.scriptpubkey_type.as_deref() == Some("op_return") {
-                    if let Some(transfer) = self.parse_transfer_from_op_return(tx, vout, block).await {
+                    if let Some(transfer) =
+                        self.parse_transfer_from_op_return(tx, vout, block).await
+                    {
                         transfers.push(transfer);
                     }
                 }
