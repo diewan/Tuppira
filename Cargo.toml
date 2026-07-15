@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["shared", "storage", "indexer", "api", "ui"]
+# The Dioxus UI remains available for restoration work, but the testnet
+# certification baseline is the data plane only.
+default-members = ["shared", "storage", "indexer", "api"]
 
 [workspace.package]
 version = "0.1.5"
@@ -23,12 +26,12 @@ dioxus-web = "0.7"
 futures = "0.3"
 hex = "0.4.3"
 lazy_static = "1.4"
-prometheus = "0.13"
+prometheus = "0.14"
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha3 = "0.10"
-sqlx = { version = "0.8", features = ["sqlite", "_rt-tokio", "tls-rustls", "chrono"] }
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio", "tls-rustls", "chrono", "derive"] }
 thiserror = "1.0"
 tokio = { version = "1", features = ["rt", "macros", "time", "rt-multi-thread", "sync", "signal"] }
 toml = "0.8"

@@ -40,3 +40,7 @@ target/
 
 # Solana
 test-ledger/
+
+# Runtime explorer data; the read model is reconstructed from canonical data.
+/data/*.db
+/data/*.sqlite

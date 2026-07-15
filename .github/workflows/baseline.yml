@@ -1,0 +1,21 @@
+name: Explorer certification baseline
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  data-plane:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace --exclude csv-explorer-ui
+      - run: cargo clippy --workspace --exclude csv-explorer-ui -- -D warnings
+      - run: cargo install cargo-audit --locked
+      # See SECURITY_AUDIT.md: SQLx records an unused optional MySQL package
+      # in Cargo.lock even though the certified graph has no MySQL path.
+      - run: cargo audit --ignore RUSTSEC-2023-0071

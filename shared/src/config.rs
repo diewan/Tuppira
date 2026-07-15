@@ -42,6 +42,13 @@ pub struct ApiConfig {
     /// Port to listen on.
     #[serde(default = "default_api_port")]
     pub port: u16,
+    /// Browser origins permitted to call the public read API. Empty disables
+    /// cross-origin browser access rather than allowing every origin.
+    #[serde(default)]
+    pub cors_origins: Vec<String>,
+    /// Development-only GraphQL explorer and introspection switch.
+    #[serde(default)]
+    pub enable_graphql_playground: bool,
 }
 
 impl ApiConfig {
@@ -167,7 +174,7 @@ impl ExplorerConfig {
         let content = std::fs::read_to_string(path).map_err(crate::ExplorerError::Io)?;
         let config: ExplorerConfig =
             toml::from_str(&content).map_err(|e| crate::ExplorerError::Toml(e.to_string()))?;
-        Ok(config.with_discovered_chains())
+        config.with_discovered_chains().with_database_url_from_env()
     }
 
     /// Load configuration from the default locations.
@@ -187,7 +194,7 @@ impl ExplorerConfig {
         }
 
         // Fall back to defaults
-        Self::default_config()
+        Self::default_config()?.with_database_url_from_env()
     }
 
     /// Create a configuration with all defaults values.
@@ -200,6 +207,8 @@ impl ExplorerConfig {
             api: ApiConfig {
                 host: default_api_host(),
                 port: default_api_port(),
+                cors_origins: Vec::new(),
+                enable_graphql_playground: false,
             },
             ui: UiConfig {
                 host: default_ui_host(),
@@ -221,6 +230,28 @@ impl ExplorerConfig {
         // TODO: Implement chain discovery from config files
         // For now, return config as-is without chain discovery
         self
+    }
+
+    /// Applies the Compose/operator database URL without requiring a second
+    /// configuration file. An empty override is a configuration error rather
+    /// than a silent fallback to a different database.
+    fn with_database_url_from_env(self) -> Result<Self, crate::ExplorerError> {
+        self.with_database_url_override(std::env::var("DATABASE_URL").ok())
+    }
+
+    fn with_database_url_override(
+        mut self,
+        database_url: Option<String>,
+    ) -> Result<Self, crate::ExplorerError> {
+        if let Some(url) = database_url {
+            if url.trim().is_empty() {
+                return Err(crate::ExplorerError::Parse(
+                    "DATABASE_URL must not be empty".to_string(),
+                ));
+            }
+            self.database.url = url;
+        }
+        Ok(self)
     }
 }
 
@@ -247,6 +278,8 @@ impl Default for ApiConfig {
         ApiConfig {
             host: default_api_host(),
             port: default_api_port(),
+            cors_origins: Vec::new(),
+            enable_graphql_playground: false,
         }
     }
 }
@@ -280,5 +313,29 @@ impl Default for ChainConfig {
             start_block: None,
             poll_interval_ms: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExplorerConfig;
+
+    #[test]
+    fn database_url_override_replaces_file_or_default_configuration() {
+        let result = ExplorerConfig::default_config().and_then(|config| {
+            config.with_database_url_override(Some("sqlite:///data/explorer.db".to_string()))
+        });
+        assert!(
+            matches!(result, Ok(config) if config.database.url == "sqlite:///data/explorer.db")
+        );
+    }
+
+    #[test]
+    fn empty_database_url_override_fails_closed() {
+        let result = ExplorerConfig::default_config()
+            .and_then(|config| config.with_database_url_override(Some("   ".to_string())));
+        assert!(
+            matches!(result, Err(crate::ExplorerError::Parse(message)) if message == "DATABASE_URL must not be empty")
+        );
     }
 }

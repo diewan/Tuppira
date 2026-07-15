@@ -643,7 +643,7 @@ impl WalletFeedEnvelope {
 
 /// An idempotent, ordered wallet feed projection.  It intentionally contains
 /// no transfer or seal mutation methods.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct WalletFeedProjection {
     last_sequence: u64,
     envelopes: std::collections::BTreeMap<u64, WalletFeedEnvelope>,
@@ -688,14 +688,11 @@ impl WalletFeedProjection {
             envelope.event.transaction_id,
             envelope.event.log_index
         );
-        if envelope.reorg_replacement.is_none() {
-            if let Some(previous) = self.finality.get(&event_key) {
-                if finality_rank(envelope.finality) < finality_rank(*previous) {
-                    return Err(
-                        "finality may not regress without an explicit reorg replacement".into(),
-                    );
-                }
-            }
+        if envelope.reorg_replacement.is_none()
+            && let Some(previous) = self.finality.get(&event_key)
+            && finality_rank(envelope.finality) < finality_rank(*previous)
+        {
+            return Err("finality may not regress without an explicit reorg replacement".into());
         }
         self.last_sequence = envelope.sequence;
         self.observation_sequences

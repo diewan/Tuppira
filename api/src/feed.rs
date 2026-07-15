@@ -1,9 +1,10 @@
-//! In-memory distribution for the untrusted wallet discovery feed.
+//! Durable distribution for the untrusted wallet discovery feed.
 //!
-//! Persistence and chain verification deliberately remain outside this API
-//! component.  The hub validates ordering before a message is published.
+//! Chain verification remains outside this API component. The hub validates
+//! ordering and persists an observation before it is published.
 use std::sync::Arc;
 
+use sqlx::SqlitePool;
 use tokio::sync::{RwLock, broadcast};
 
 use csv_explorer_shared::{WalletFeedEnvelope, WalletFeedProjection};
@@ -12,6 +13,7 @@ use csv_explorer_shared::{WalletFeedEnvelope, WalletFeedProjection};
 pub struct WalletFeedHub {
     projection: Arc<RwLock<WalletFeedProjection>>,
     publisher: broadcast::Sender<WalletFeedEnvelope>,
+    pool: Option<SqlitePool>,
 }
 
 impl WalletFeedHub {
@@ -20,14 +22,55 @@ impl WalletFeedHub {
         Self {
             projection: Arc::new(RwLock::new(WalletFeedProjection::default())),
             publisher,
+            pool: None,
         }
+    }
+
+    /// Rebuild the delivery projection from persisted observations. Corrupt
+    /// history is a startup failure, never an excuse to drop wallet evidence.
+    pub async fn from_pool(pool: SqlitePool) -> Result<Self, String> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT envelope_json FROM wallet_feed_events ORDER BY sequence ASC",
+        )
+        .fetch_all(&pool)
+        .await
+        .map_err(|error| format!("failed to load wallet feed: {error}"))?;
+        let mut projection = WalletFeedProjection::default();
+        for row in rows {
+            let envelope: WalletFeedEnvelope = serde_json::from_str(&row)
+                .map_err(|error| format!("stored wallet feed is invalid: {error}"))?;
+            projection
+                .apply(envelope)
+                .map_err(|error| format!("stored wallet feed violates ordering: {error}"))?;
+        }
+        let (publisher, _) = broadcast::channel(256);
+        Ok(Self {
+            projection: Arc::new(RwLock::new(projection)),
+            publisher,
+            pool: Some(pool),
+        })
     }
 
     /// Publish a validated indexer observation. Duplicate reconnect delivery is
     /// intentionally ignored; no runtime or wallet state is mutated here.
     pub async fn publish(&self, envelope: WalletFeedEnvelope) -> Result<(), String> {
         let mut projection = self.projection.write().await;
-        if projection.apply(envelope.clone())? {
+        let mut candidate = projection.clone();
+        if candidate.apply(envelope.clone())? {
+            if let Some(pool) = &self.pool {
+                let serialized = serde_json::to_string(&envelope)
+                    .map_err(|error| format!("failed to serialize wallet feed: {error}"))?;
+                sqlx::query(
+                    "INSERT INTO wallet_feed_events (sequence, observation_id, envelope_json) VALUES (?, ?, ?)",
+                )
+                .bind(envelope.sequence as i64)
+                .bind(&envelope.observation_id)
+                .bind(serialized)
+                .execute(pool)
+                .await
+                .map_err(|error| format!("failed to persist wallet feed: {error}"))?;
+            }
+            *projection = candidate;
             let _ = self.publisher.send(envelope);
         }
         Ok(())
@@ -139,5 +182,29 @@ mod tests {
             hub.since(0).await[0].freshness.status,
             IndexerFreshnessStatus::Stale
         );
+    }
+
+    #[tokio::test]
+    async fn durable_feed_rebuilds_after_restart() {
+        let pool = csv_explorer_storage::init_pool("sqlite::memory:", 1).await;
+        assert!(pool.is_ok());
+        let pool = match pool {
+            Ok(pool) => pool,
+            Err(_) => return,
+        };
+        let hub = WalletFeedHub::from_pool(pool.clone()).await;
+        assert!(hub.is_ok());
+        let hub = match hub {
+            Ok(hub) => hub,
+            Err(_) => return,
+        };
+        assert!(hub.publish(observation(1)).await.is_ok());
+        let reloaded = WalletFeedHub::from_pool(pool).await;
+        assert!(reloaded.is_ok());
+        let reloaded = match reloaded {
+            Ok(hub) => hub,
+            Err(_) => return,
+        };
+        assert_eq!(reloaded.since(0).await.len(), 1);
     }
 }

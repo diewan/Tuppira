@@ -1,7 +1,10 @@
 services:
   indexer:
     build:
-      context: .
+      # The sibling protocol workspace is a declared dependency of the
+      # explorer crates, so the build context is the deliberate monorepo root.
+      context: ../..
+      dockerfile: csv-apps/csv-explorer/Dockerfile
       target: indexer
     command: ["csv-explorer-indexer", "start"]
     volumes:
@@ -20,7 +23,8 @@ services:
 
   api:
     build:
-      context: .
+      context: ../..
+      dockerfile: csv-apps/csv-explorer/Dockerfile
       target: api
     command: ["csv-explorer-api", "start"]
     ports:
@@ -36,25 +40,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  ui:
-    build:
-      context: .
-      target: ui
-    command: ["csv-explorer-ui", "serve"]
-    ports:
-      - "3000:3000"
-    environment:
-      - API_URL=http://api:8080
-      - CONFIG_PATH=/app/config.toml
-    depends_on:
-      - api
     restart: unless-stopped
     logging:
       driver: json-file

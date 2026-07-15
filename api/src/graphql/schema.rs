@@ -578,10 +578,19 @@ impl Subscription {
     }
 }
 
-pub fn create_schema(context: GraphqlContext) -> Schema<Query, Mutation, Subscription> {
-    Schema::build(Query, Mutation, Subscription)
+pub fn create_schema(
+    context: GraphqlContext,
+    enable_introspection: bool,
+) -> Schema<Query, Mutation, Subscription> {
+    let builder = Schema::build(Query, Mutation, Subscription)
         .data(context)
-        .finish()
+        .limit_depth(12)
+        .limit_complexity(1_000);
+    if enable_introspection {
+        builder.finish()
+    } else {
+        builder.disable_introspection().finish()
+    }
 }
 
 #[cfg(test)]

@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)] // EXP-003 replaces these legacy decoders wholesale.
+
 /// Ethereum chain indexer implementation.
 ///
 /// Fixes applied:
@@ -131,6 +133,17 @@ impl ChainIndexer for EthereumIndexer {
     async fn initialize(&self) -> ChainResult<()> {
         tracing::info!(chain = "ethereum", "Ethereum indexer initialized");
         Ok(())
+    }
+
+    async fn index_explorer_events(
+        &self,
+        block: u64,
+    ) -> ChainResult<Vec<csv_explorer_shared::ExplorerEventDto>> {
+        Err(ExplorerError::BlockError {
+            chain: self.chain_id().to_string(),
+            block,
+            message: "canonical Ethereum event decoder is not configured".to_string(),
+        })
     }
 
     async fn get_chain_tip(&self) -> ChainResult<u64> {

@@ -1,5 +1,5 @@
 /// REST API routes for the CSV Explorer.
-use axum::{Router, routing::delete, routing::get, routing::post};
+use axum::{Router, routing::get};
 
 use super::handlers;
 
@@ -30,36 +30,6 @@ pub fn rest_routes() -> Router<AppState> {
         // Chains
         .route("/chains", get(handlers::list_chains))
         .route("/wallet/feed", get(handlers::wallet_feed))
-        // Wallet priority indexing
-        .route("/wallet/addresses", post(handlers::register_wallet_address))
-        .route(
-            "/wallet/addresses",
-            delete(handlers::unregister_wallet_address),
-        )
-        .route(
-            "/wallet/{wallet_id}/addresses",
-            get(handlers::get_wallet_addresses),
-        )
-        .route(
-            "/wallet/address/{address}/data",
-            get(handlers::get_address_data),
-        )
-        .route(
-            "/wallet/address/{address}/sanads",
-            get(handlers::get_address_sanads),
-        )
-        .route(
-            "/wallet/address/{address}/seals",
-            get(handlers::get_address_seals),
-        )
-        .route(
-            "/wallet/address/{address}/transfers",
-            get(handlers::get_address_transfers),
-        )
-        .route(
-            "/wallet/priority/status",
-            get(handlers::get_priority_indexing_status),
-        )
         // Enhanced sanads with commitment metadata
         .route("/sanads/enhanced", get(handlers::list_enhanced_sanads))
         .route("/sanads/enhanced/{id}", get(handlers::get_enhanced_sanad))

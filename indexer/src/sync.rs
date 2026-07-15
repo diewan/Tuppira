@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)] // EXP-003 replaces the legacy ingestion loop.
+
 /// Sync coordination for multi-chain indexing.
 ///
 /// Manages sync progress per chain, handles reorgs, and coordinates
@@ -596,124 +598,29 @@ async fn sync_chain(indexer: &dyn ChainIndexer, ctx: &SyncContext) -> Result<(),
     tracing::debug!(chain = chain_id, from = current, to = end, "Syncing chain");
 
     while current <= end {
-        // Process block and get all data in one call
-        match indexer.process_block(current).await {
-            Ok(_block_result) => {
-                // Now get the actual data to store
-                let sanads = indexer.index_sanads(current).await?;
-                let seals = indexer.index_seals(current).await?;
-                let transfers = indexer.index_transfers(current).await?;
-                let contracts = indexer.index_contracts(current).await?;
-                let enhanced_sanads = indexer.index_enhanced_sanads(current).await?;
-                let enhanced_seals = indexer.index_enhanced_seals(current).await?;
-                let enhanced_transfers = indexer.index_enhanced_transfers(current).await?;
-
-                // Store sanads
-                for sanad in &sanads {
-                    if let Err(e) = ctx.sanads_repo.insert(sanad).await {
-                        tracing::warn!(
-                            chain = chain_id,
-                            block = current,
-                            sanad_id = %sanad.id,
-                            error = %e,
-                            "Failed to insert sanad"
-                        );
-                    }
-                }
-
-                // Store seals
-                for seal in &seals {
-                    if let Err(e) = ctx.seals_repo.insert(seal).await {
-                        tracing::warn!(
-                            chain = chain_id,
-                            block = current,
-                            seal_id = %seal.id,
-                            error = %e,
-                            "Failed to insert seal"
-                        );
-                    }
-                }
-
-                // Store transfers
-                for transfer in &transfers {
-                    if let Err(e) = ctx.transfers_repo.insert(transfer).await {
-                        tracing::warn!(
-                            chain = chain_id,
-                            block = current,
-                            transfer_id = %transfer.id,
-                            error = %e,
-                            "Failed to insert transfer"
-                        );
-                    }
-                }
-
-                // Store contracts
-                for contract in &contracts {
-                    if let Err(e) = ctx.contracts_repo.insert(contract).await {
-                        tracing::warn!(
-                            chain = chain_id,
-                            block = current,
-                            contract_id = %contract.id,
-                            error = %e,
-                            "Failed to insert contract"
-                        );
-                    }
-                }
-
-                // Store enhanced sanads
-                for sanad in &enhanced_sanads {
-                    if let Err(e) = ctx.advanced_repo.insert_enhanced_sanad(sanad).await {
-                        tracing::warn!(
-                            chain = chain_id,
-                            block = current,
-                            sanad_id = %sanad.id,
-                            error = %e,
-                            "Failed to insert enhanced sanad"
-                        );
-                    }
-                }
-
-                // Store enhanced seals
-                for seal in &enhanced_seals {
-                    if let Err(e) = ctx.advanced_repo.insert_enhanced_seal(seal).await {
-                        tracing::warn!(
-                            chain = chain_id,
-                            block = current,
-                            seal_id = %seal.id,
-                            error = %e,
-                            "Failed to insert enhanced seal"
-                        );
-                    }
-                }
-
-                // Store enhanced transfers
-                for transfer in &enhanced_transfers {
-                    if let Err(e) = ctx.advanced_repo.insert_enhanced_transfer(transfer).await {
-                        tracing::warn!(
-                            chain = chain_id,
-                            block = current,
-                            transfer_id = %transfer.id,
-                            error = %e,
-                            "Failed to insert enhanced transfer"
-                        );
-                    }
-                }
-
-                tracing::debug!(
-                    chain = chain_id,
-                    block = current,
-                    sanads = sanads.len(),
-                    seals = seals.len(),
-                    transfers = transfers.len(),
-                    contracts = contracts.len(),
-                    "Processed and stored block data"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(chain = chain_id, block = current, error = %e, "Failed to process block");
-                // Continue to next block even if current block fails
-            }
+        // Canonical event decoding is the only ingestion boundary. In
+        // particular, do not fall back to the legacy record builders: they
+        // manufacture ownership, timestamps, and deployment state.
+        let events = indexer.index_explorer_events(current).await?;
+        for event in &events {
+            event
+                .validate()
+                .map_err(|message| ExplorerError::BlockError {
+                    chain: chain_id.to_string(),
+                    block: current,
+                    message,
+                })?;
         }
+
+        // EXP-004 owns durable, atomic materialization. Until that boundary
+        // exists, successfully decoded events must not be projected into the
+        // legacy record tables, which have no provenance/finality columns.
+        tracing::debug!(
+            chain = chain_id,
+            block = current,
+            event_count = events.len(),
+            "Validated canonical chain events"
+        );
 
         // Update sync progress
         ctx.sync_repo

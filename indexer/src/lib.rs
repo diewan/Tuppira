@@ -7,6 +7,7 @@ pub mod bitcoin;
 pub mod chain_indexer;
 pub mod ethereum;
 pub mod indexer_plugin;
+pub mod manifest;
 pub mod metrics;
 pub mod rpc_manager;
 pub mod solana;
@@ -36,6 +37,17 @@ impl Indexer {
     /// Create a new indexer with the given configuration and database pool.
     /// Uses the plug-and-play indexer registry for dynamic chain support.
     pub async fn new(config: ExplorerConfig, pool: SqlitePool) -> Result<Self> {
+        if config.chains.values().any(|chain| chain.enabled) {
+            let manifest_path = std::env::var("DEPLOYMENT_MANIFEST_PATH").map_err(|_| {
+                csv_explorer_shared::ExplorerError::Parse(
+                    "DEPLOYMENT_MANIFEST_PATH is required when any chain is enabled".to_string(),
+                )
+            })?;
+            manifest::validate_enabled_chains(
+                std::path::Path::new(&manifest_path),
+                &config.chains,
+            )?;
+        }
         // Load RPC configuration
         let rpc_manager = RpcManager::new(load_rpc_config()?);
 

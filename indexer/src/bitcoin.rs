@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)] // EXP-003 replaces these legacy decoders wholesale.
+
 /// Bitcoin chain indexer implementation.
 ///
 /// Fixes applied:
@@ -16,8 +18,8 @@ use super::chain_indexer::{AddressIndexingResult, ChainIndexer, ChainResult};
 use super::rpc_manager::RpcManager;
 use csv_explorer_shared::{
     ChainConfig, CommitmentScheme, CsvContract, EnhancedSanadRecord, EnhancedSealRecord,
-    EnhancedTransferRecord, FinalityProofType, InclusionProofType, Network, PriorityLevel,
-    SanadRecord, SealRecord, SealStatus, SealType, TransferRecord,
+    EnhancedTransferRecord, ExplorerError, FinalityProofType, InclusionProofType, Network,
+    PriorityLevel, SanadRecord, SealRecord, SealStatus, SealType, TransferRecord,
 };
 
 /// Bitcoin-specific indexer.
@@ -80,6 +82,17 @@ impl ChainIndexer for BitcoinIndexer {
     async fn initialize(&self) -> ChainResult<()> {
         tracing::info!(chain = "bitcoin", "Bitcoin indexer initialized");
         Ok(())
+    }
+
+    async fn index_explorer_events(
+        &self,
+        block: u64,
+    ) -> ChainResult<Vec<csv_explorer_shared::ExplorerEventDto>> {
+        Err(ExplorerError::BlockError {
+            chain: self.chain_id().to_string(),
+            block,
+            message: "canonical Bitcoin event decoder is not configured".to_string(),
+        })
     }
 
     async fn get_chain_tip(&self) -> ChainResult<u64> {

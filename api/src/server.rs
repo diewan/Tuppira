@@ -1,4 +1,3 @@
-use async_graphql::Request;
 /// API server setup and configuration.
 ///
 /// Combines GraphQL and REST APIs with CORS, tracing, and metrics.
@@ -6,13 +5,17 @@ use async_graphql::http::{GraphQLPlaygroundConfig, playground_source};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse, GraphQLSubscription};
 use axum::{
     Router, Server,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
+    http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
     response::{Html, IntoResponse},
     routing::get,
 };
 use sqlx::SqlitePool;
 use tower::ServiceBuilder;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
+    trace::TraceLayer,
+};
 
 use csv_explorer_storage::init_pool;
 
@@ -40,20 +43,24 @@ impl ApiServer {
     /// Start the API server.
     pub async fn start(self) -> Result<()> {
         let pool = self.pool.clone();
-        let feed = WalletFeedHub::new();
-        let schema = create_schema(GraphqlContext {
-            pool: pool.clone(),
-            feed: feed.clone(),
-        });
+        let feed = WalletFeedHub::from_pool(pool.clone())
+            .await
+            .map_err(csv_explorer_shared::ExplorerError::Internal)?;
+        let schema = create_schema(
+            GraphqlContext {
+                pool: pool.clone(),
+                feed: feed.clone(),
+            },
+            self.config.enable_graphql_playground,
+        );
+        let cors = cors_layer(&self.config.cors_origins)?;
 
         // Merge REST API into main router
-        let app = Router::new()
+        let mut app = Router::new()
             // GraphQL endpoint
             .route("/graphql", axum::routing::post(graphql_handler))
             // GraphQL WebSocket subscriptions use the same schema DTO/context.
             .route_service("/graphql/ws", GraphQLSubscription::new(schema.clone()))
-            // GraphQL Playground
-            .route("/playground", get(graphql_playground))
             // REST API v1
             .merge(rest::routes::api_v1_routes())
             // Prometheus metrics
@@ -61,10 +68,14 @@ impl ApiServer {
             // Health check
             .route("/health", get(health_handler))
             // Middleware
-            .layer(CorsLayer::permissive())
+            .layer(cors)
+            .layer(DefaultBodyLimit::max(1_048_576))
             .layer(TraceLayer::new_for_http())
             .layer(ServiceBuilder::new())
             .with_state((schema, pool, feed));
+        if self.config.enable_graphql_playground {
+            app = app.route("/playground", get(graphql_playground));
+        }
 
         let addr: std::net::SocketAddr = self.config.bind().parse().map_err(|e| {
             csv_explorer_shared::ExplorerError::Internal(format!(
@@ -83,6 +94,32 @@ impl ApiServer {
             })?;
 
         Ok(())
+    }
+}
+
+fn cors_layer(origins: &[String]) -> Result<CorsLayer> {
+    let mut allowed = Vec::with_capacity(origins.len());
+    for origin in origins {
+        if origin == "*" {
+            return Err(csv_explorer_shared::ExplorerError::Parse(
+                "api.cors_origins must list explicit origins; '*' is forbidden".to_string(),
+            ));
+        }
+        let value = HeaderValue::from_str(origin).map_err(|error| {
+            csv_explorer_shared::ExplorerError::Parse(format!(
+                "invalid api.cors_origins entry {origin:?}: {error}"
+            ))
+        })?;
+        allowed.push(value);
+    }
+
+    let layer = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers([CONTENT_TYPE]);
+    if allowed.is_empty() {
+        Ok(layer)
+    } else {
+        Ok(layer.allow_origin(AllowOrigin::list(allowed)))
     }
 }
 
@@ -105,21 +142,41 @@ async fn graphql_handler(
     req: GraphQLRequest,
 ) -> GraphQLResponse {
     let inner_req = req.into_inner();
-    let request = Request::from(inner_req);
+    let request = inner_req;
     let response = schema.execute(request).await;
     GraphQLResponse::from(response)
 }
 
 /// Serve Prometheus metrics.
 async fn metrics_handler() -> impl IntoResponse {
-    let metrics = csv_explorer_indexer::metrics::encode_metrics();
-    metrics
+    csv_explorer_indexer::metrics::encode_metrics()
 }
 
 /// Health check handler.
-async fn health_handler() -> impl IntoResponse {
-    axum::Json(serde_json::json!({
-        "status": "ok",
-        "service": "csv-explorer-api"
-    }))
+async fn health_handler(
+    State((_, pool, _)): State<(
+        async_graphql::Schema<
+            crate::graphql::schema::Query,
+            crate::graphql::schema::Mutation,
+            crate::graphql::schema::Subscription,
+        >,
+        SqlitePool,
+        WalletFeedHub,
+    )>,
+) -> impl IntoResponse {
+    if sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(&pool)
+        .await
+        .is_ok()
+    {
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({"status": "ok", "service": "csv-explorer-api"})),
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"status": "unavailable", "service": "csv-explorer-api"})),
+        )
+    }
 }

@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)] // EXP-003 replaces these legacy decoders wholesale.
+
 /// Sui chain indexer implementation.
 ///
 /// Subscribes to Sui checkpoint events and tracks:
@@ -74,6 +76,17 @@ impl ChainIndexer for SuiIndexer {
         Ok(())
     }
 
+    async fn index_explorer_events(
+        &self,
+        block: u64,
+    ) -> ChainResult<Vec<csv_explorer_shared::ExplorerEventDto>> {
+        Err(ExplorerError::BlockError {
+            chain: self.chain_id().to_string(),
+            block,
+            message: "canonical Sui event decoder is not configured".to_string(),
+        })
+    }
+
     async fn get_chain_tip(&self) -> ChainResult<u64> {
         let rpc_url = if let Some(ref manager) = self.rpc_manager {
             if let Some(endpoint) = manager.get_endpoint("sui") {
@@ -109,10 +122,8 @@ impl ChainIndexer for SuiIndexer {
             // Handle both string and number formats from Sui RPC
             let checkpoint_num = if let Some(s) = result.as_str() {
                 s.parse::<u64>().unwrap_or(0)
-            } else if let Some(n) = result.as_u64() {
-                n
             } else {
-                0
+                result.as_u64().unwrap_or_default()
             };
             Ok(checkpoint_num)
         } else {

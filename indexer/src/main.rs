@@ -170,19 +170,35 @@ async fn wait_for_shutdown() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("Failed to create SIGTERM handler");
-        let mut sighup = signal(SignalKind::hangup()).expect("Failed to create SIGHUP handler");
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(signal) => Some(signal),
+            Err(error) => {
+                tracing::warn!(%error, "SIGTERM handling is unavailable");
+                None
+            }
+        };
+        let mut sighup = match signal(SignalKind::hangup()) {
+            Ok(signal) => Some(signal),
+            Err(error) => {
+                tracing::warn!(%error, "SIGHUP handling is unavailable");
+                None
+            }
+        };
 
         tokio::select! {
-            _ = ctrl_c => tracing::info!("Received SIGINT"),
-            _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
-            _ = sighup.recv() => tracing::info!("Received SIGHUP"),
+            result = ctrl_c => match result {
+                Ok(()) => tracing::info!("Received SIGINT"),
+                Err(error) => tracing::warn!(%error, "SIGINT handling failed"),
+            },
+            _ = async { match sigterm.as_mut() { Some(signal) => signal.recv().await, None => std::future::pending().await } } => tracing::info!("Received SIGTERM"),
+            _ = async { match sighup.as_mut() { Some(signal) => signal.recv().await, None => std::future::pending().await } } => tracing::info!("Received SIGHUP"),
         }
     }
     #[cfg(not(unix))]
     {
-        ctrl_c.await.expect("Failed to listen for Ctrl+C");
-        tracing::info!("Received Ctrl+C");
+        match ctrl_c.await {
+            Ok(()) => tracing::info!("Received Ctrl+C"),
+            Err(error) => tracing::warn!(%error, "Ctrl+C handling failed"),
+        }
     }
 }

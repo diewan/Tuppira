@@ -1,115 +1,47 @@
 # syntax=docker/dockerfile:1
-
-###############################################################################
-# Base builder stage
-###############################################################################
+# Build from the `Work/` monorepo directory so the protocol path dependencies
+# are inside the declared build context:
+# docker build -f csv-apps/csv-explorer/Dockerfile --target api .
 FROM rust:1.95-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config \
-    libssl-dev \
-    sqlite3 \
-    libsqlite3-dev \
+    pkg-config libssl-dev libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /workspace/csv-apps/csv-explorer
 
-# Copy workspace Cargo.toml first for dependency caching
-COPY Cargo.toml Cargo.lock ./
-COPY shared/Cargo.toml shared/
-COPY storage/Cargo.toml storage/
-COPY indexer/Cargo.toml indexer/
-COPY api/Cargo.toml api/
-COPY ui/Cargo.toml ui/
+# Both workspaces are deliberate build inputs. No Docker COPY reaches outside
+# the context, and the UI is intentionally not part of either production image.
+COPY csv-protocol /workspace/csv-protocol
+COPY csv-apps/csv-explorer /workspace/csv-apps/csv-explorer
 
-# Create dummy source files for dependency resolution
-RUN mkdir -p shared/src storage/src indexer/src api/src ui/src && \
-    echo "pub fn dummy() {}" > shared/src/lib.rs && \
-    echo "pub fn dummy() {}" > storage/src/lib.rs && \
-    echo "pub fn dummy() {}" > indexer/src/lib.rs && \
-    echo "pub fn dummy() {}" > indexer/src/main.rs && \
-    echo "pub fn dummy() {}" > api/src/lib.rs && \
-    echo "pub fn dummy() {}" > api/src/main.rs && \
-    echo "fn main() {}" > ui/src/main.rs
+RUN cargo build --locked --release \
+    --package csv-explorer-indexer \
+    --package csv-explorer-api
 
-# Build dependencies only (caching layer)
-RUN cargo build --workspace --release && rm -rf /app/target/release/deps/*
-
-# Copy actual source
-COPY shared/src/ shared/src/
-COPY storage/src/ storage/src/
-COPY indexer/src/ indexer/src/
-COPY api/src/ api/src/
-COPY ui/src/ ui/src/
-
-# Build everything
-RUN cargo build --workspace --release
-
-###############################################################################
-# Indexer runtime
-###############################################################################
-FROM debian:bookworm-slim AS indexer
+FROM debian:bookworm-slim AS runtime-base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    sqlite3 \
-    libsqlite3-0 \
+    ca-certificates libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /app/data && chown -R 1000:1000 /app
+RUN install -d -o 1000 -g 1000 /app/data
 WORKDIR /app
-
-COPY --from=builder /app/target/release/csv-explorer-indexer /usr/local/bin/
-COPY config.example.toml /app/config.toml
-
+COPY csv-apps/csv-explorer/config.example.toml /app/config.toml
 USER 1000
-EXPOSE 9090
 
+FROM runtime-base AS indexer
+COPY --from=builder /workspace/csv-apps/csv-explorer/target/release/csv-explorer-indexer /usr/local/bin/
 ENTRYPOINT ["csv-explorer-indexer"]
 CMD ["start"]
 
-###############################################################################
-# API runtime
-###############################################################################
-FROM debian:bookworm-slim AS api
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    sqlite3 \
-    libsqlite3-0 \
+FROM runtime-base AS api
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
-
-RUN mkdir -p /app/data && chown -R 1000:1000 /app
-WORKDIR /app
-
-COPY --from=builder /app/target/release/csv-explorer-api /usr/local/bin/
-COPY config.example.toml /app/config.toml
-
+COPY --from=builder /workspace/csv-apps/csv-explorer/target/release/csv-explorer-api /usr/local/bin/
 USER 1000
 EXPOSE 8080
-
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
-
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 CMD curl -fsS http://localhost:8080/health || exit 1
 ENTRYPOINT ["csv-explorer-api"]
 CMD ["start"]
-
-###############################################################################
-# UI runtime (web)
-###############################################################################
-FROM debian:bookworm-slim AS ui
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-COPY --from=builder /app/target/release/csv-explorer-ui /usr/local/bin/
-COPY config.example.toml /app/config.toml
-
-EXPOSE 3000
-
-ENTRYPOINT ["csv-explorer-ui"]
-CMD ["serve"]

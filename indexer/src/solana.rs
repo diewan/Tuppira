@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)] // EXP-003 replaces these legacy decoders wholesale.
+
 /// Solana chain indexer implementation.
 ///
 /// Fixes applied:
@@ -60,6 +62,17 @@ impl ChainIndexer for SolanaIndexer {
     async fn initialize(&self) -> ChainResult<()> {
         tracing::info!(chain = "solana", "Solana indexer initialized");
         Ok(())
+    }
+
+    async fn index_explorer_events(
+        &self,
+        block: u64,
+    ) -> ChainResult<Vec<csv_explorer_shared::ExplorerEventDto>> {
+        Err(ExplorerError::BlockError {
+            chain: self.chain_id().to_string(),
+            block,
+            message: "canonical Solana event decoder is not configured".to_string(),
+        })
     }
 
     // -----------------------------------------------------------------------

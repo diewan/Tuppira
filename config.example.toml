@@ -4,6 +4,10 @@ url = "sqlite://explorer.db"
 [api]
 host = "0.0.0.0"
 port = 8080
+# Permit only the deployed wallet/UI origins. Keep empty for server-to-server API use.
+cors_origins = ["http://localhost:3000"]
+# Development-only; production keeps the playground and GraphQL introspection disabled.
+enable_graphql_playground = false
 
 [ui]
 host = "0.0.0.0"

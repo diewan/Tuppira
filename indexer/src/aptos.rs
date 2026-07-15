@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)] // EXP-003 replaces these legacy decoders wholesale.
+
 /// Aptos chain indexer implementation.
 ///
 /// Subscribes to Aptos ledger state updates and tracks:
@@ -12,8 +14,8 @@ use super::chain_indexer::{AddressIndexingResult, ChainIndexer, ChainResult};
 use super::rpc_manager::RpcManager;
 use csv_explorer_shared::{
     ChainConfig, CommitmentScheme, ContractStatus, ContractType, CsvContract, EnhancedSanadRecord,
-    EnhancedSealRecord, EnhancedTransferRecord, FinalityProofType, InclusionProofType, SanadRecord,
-    SealRecord, SealStatus, SealType, TransferRecord,
+    EnhancedSealRecord, EnhancedTransferRecord, ExplorerError, FinalityProofType,
+    InclusionProofType, SanadRecord, SealRecord, SealStatus, SealType, TransferRecord,
 };
 
 /// Aptos-specific indexer.
@@ -70,6 +72,17 @@ impl ChainIndexer for AptosIndexer {
     async fn initialize(&self) -> ChainResult<()> {
         tracing::info!(chain = "aptos", "Aptos indexer initialized");
         Ok(())
+    }
+
+    async fn index_explorer_events(
+        &self,
+        block: u64,
+    ) -> ChainResult<Vec<csv_explorer_shared::ExplorerEventDto>> {
+        Err(ExplorerError::BlockError {
+            chain: self.chain_id().to_string(),
+            block,
+            message: "canonical Aptos event decoder is not configured".to_string(),
+        })
     }
 
     async fn get_chain_tip(&self) -> ChainResult<u64> {
