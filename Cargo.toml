@@ -49,4 +49,4 @@ unimplemented = "deny"
 unwrap_used = "deny"
 
 [patch.crates-io]
-spl-token-2022-interface = { path = "../../csv-protocol/third_party/spl-token-2022-interface" }
+spl-token-2022-interface = { path = "../../parwana/third_party/spl-token-2022-interface" }

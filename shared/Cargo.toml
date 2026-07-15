@@ -17,9 +17,9 @@ chrono.workspace = true
 hex.workspace = true
 getrandom = { version = "0.2", features = ["js"] }
 uuid = { version = "1.0", features = ["v4", "serde", "js"] }
-csv-protocol = { path = "../../../csv-protocol/csv-protocol" }
-csv-hash = { path = "../../../csv-protocol/csv-hash", features = ["serde"] }
-csv-sdk = { path = "../../../csv-protocol/csv-sdk", default-features = false }
+csv-protocol = { path = "../../parwana/csv-protocol" }
+csv-hash = { path = "../../parwana/csv-hash", features = ["serde"] }
+csv-sdk = { path = "../../parwana/csv-sdk", default-features = false }
 
 # Server-only dependencies
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

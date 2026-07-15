@@ -1,4 +1,4 @@
-# AGENT.md — CSV Protocol AI Engineering Rules
+# AGENT.md — Parwana AI Engineering Rules
 
 ## Mission
 

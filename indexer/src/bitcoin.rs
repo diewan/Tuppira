@@ -7,7 +7,7 @@
 ///    GET /block-height/{N} → hash string → GET /block/{hash}/txids → loop GET /tx/{txid}
 /// 2. `index_seals`: `involves_relevant_address` now actually decodes scriptpubkey
 ///    and checks address membership (was always `false`).
-/// 3. CSV protocol-tag detection uses the correct 4-byte magic from csv-adapter-core.
+/// 3. Parwana-tag detection uses the correct 4-byte magic from csv-adapter-core.
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
