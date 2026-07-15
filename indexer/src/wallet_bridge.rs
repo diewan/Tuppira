@@ -11,13 +11,13 @@ use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
-use csv_explorer_shared::{
-    ExplorerError, Network, PriorityAddress, PriorityIndexingStatus, PriorityLevel, Result,
+use tuppira_shared::{
+    TuppiraError, Network, PriorityAddress, PriorityIndexingStatus, PriorityLevel, Result,
     SanadRecord, SealRecord, TransferRecord,
 };
 
 use crate::chain_indexer::ChainIndexer;
-use csv_explorer_storage::repositories::{IndexingActivityRequest, PriorityAddressRepository};
+use tuppira_storage::repositories::{IndexingActivityRequest, PriorityAddressRepository};
 
 /// Configuration for the wallet-indexer bridge.
 #[derive(Debug, Clone)]
@@ -75,7 +75,7 @@ impl WalletIndexerBridge {
     /// Initialize the bridge (create tables, etc.).
     pub async fn initialize(&self) -> Result<()> {
         self.priority_repo.init().await.map_err(|e| {
-            ExplorerError::Internal(format!(
+            TuppiraError::Internal(format!(
                 "Failed to initialize priority address tables: {}",
                 e
             ))
@@ -96,7 +96,7 @@ impl WalletIndexerBridge {
         self.priority_repo
             .register_address(&address, &chain, network, priority, &wallet_id)
             .await
-            .map_err(|e| ExplorerError::Internal(format!("Failed to register address: {}", e)))?;
+            .map_err(|e| TuppiraError::Internal(format!("Failed to register address: {}", e)))?;
 
         tracing::info!(
             address = %address,
@@ -122,7 +122,7 @@ impl WalletIndexerBridge {
             .priority_repo
             .unregister_address(&address, &chain, network, &wallet_id)
             .await
-            .map_err(|e| ExplorerError::Internal(format!("Failed to unregister address: {}", e)))?;
+            .map_err(|e| TuppiraError::Internal(format!("Failed to unregister address: {}", e)))?;
 
         if removed {
             tracing::info!(
@@ -141,7 +141,7 @@ impl WalletIndexerBridge {
         self.priority_repo
             .get_addresses_by_wallet(wallet_id)
             .await
-            .map_err(|e| ExplorerError::Internal(format!("Failed to get wallet addresses: {}", e)))
+            .map_err(|e| TuppiraError::Internal(format!("Failed to get wallet addresses: {}", e)))
     }
 
     /// Get indexed sanads for a specific address across all chains.
@@ -261,7 +261,7 @@ impl WalletIndexerBridge {
             .get_all_active_addresses()
             .await
             .map_err(|e| {
-                ExplorerError::Internal(format!("Failed to get active addresses: {}", e))
+                TuppiraError::Internal(format!("Failed to get active addresses: {}", e))
             })?;
 
         if all_addresses.is_empty() {
@@ -456,7 +456,7 @@ impl WalletIndexerBridge {
             .get_priority_indexing_status()
             .await
             .map_err(|e| {
-                ExplorerError::Internal(format!("Failed to get priority indexing status: {}", e))
+                TuppiraError::Internal(format!("Failed to get priority indexing status: {}", e))
             })
     }
 }

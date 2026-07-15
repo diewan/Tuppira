@@ -4,14 +4,14 @@
 /// interface for block scanning, event parsing, and data indexing.
 use async_trait::async_trait;
 
-use csv_explorer_shared::{
+use tuppira_shared::{
     CommitmentScheme, CsvContract, EnhancedSanadRecord, EnhancedSealRecord, EnhancedTransferRecord,
-    ExplorerError, ExplorerEventDto, FinalityProofType, InclusionProofType, Network, PriorityLevel,
+    TuppiraError, TuppiraEventDto, FinalityProofType, InclusionProofType, Network, PriorityLevel,
     SanadRecord, SealRecord, TransferRecord,
 };
 
 /// Result type alias for chain indexer operations.
-pub type ChainResult<T> = std::result::Result<T, ExplorerError>;
+pub type ChainResult<T> = std::result::Result<T, TuppiraError>;
 
 /// Trait that each chain-specific indexer must implement.
 ///
@@ -55,8 +55,8 @@ pub trait ChainIndexer: Send + Sync {
     /// * `block` - Block height to index
     ///
     /// # Returns
-    async fn index_explorer_events(&self, block: u64) -> ChainResult<Vec<ExplorerEventDto>> {
-        Err(ExplorerError::BlockError { chain: self.chain_id().to_string(), block, message: "indexer must decode validated raw chain events; record materialization is forbidden".to_string() })
+    async fn index_tuppira_events(&self, block: u64) -> ChainResult<Vec<TuppiraEventDto>> {
+        Err(TuppiraError::BlockError { chain: self.chain_id().to_string(), block, message: "indexer must decode validated raw chain events; record materialization is forbidden".to_string() })
     }
 
     /// Parse a single block and return the latest block height processed.

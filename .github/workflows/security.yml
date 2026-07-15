@@ -9,5 +9,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: csv-explorer/scripts/secret-scan.sh
-      - run: csv-explorer/scripts/secret-scan.sh --self-test
+      - run: tuppira/scripts/secret-scan.sh
+      - run: tuppira/scripts/secret-scan.sh --self-test

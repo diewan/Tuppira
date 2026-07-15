@@ -1,4 +1,4 @@
--- CSV Explorer initial read-model schema.
+-- Tuppira initial read-model schema.
 CREATE TABLE sanads (
     id TEXT PRIMARY KEY,
     chain TEXT NOT NULL,

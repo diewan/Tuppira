@@ -1,5 +1,5 @@
 [package]
-name = "csv-explorer-shared"
+name = "tuppira-shared"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

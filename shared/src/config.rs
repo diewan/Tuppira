@@ -1,4 +1,4 @@
-/// Configuration management for the CSV Explorer.
+/// Configuration management for the Tuppira.
 ///
 /// Provides a unified configuration structure loaded from TOML files
 /// and environment variables.
@@ -11,13 +11,11 @@ use csv_sdk::rpc_policy::{ChainRpcPolicy, RpcCapability};
 
 /// Top-level explorer configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExplorerConfig {
+pub struct TuppiraConfig {
     /// Database configuration.
     pub database: DatabaseConfig,
     /// API server configuration.
     pub api: ApiConfig,
-    /// UI server configuration.
-    pub ui: UiConfig,
     /// Indexer configuration.
     pub indexer: IndexerConfig,
     /// Per-chain configuration.
@@ -27,7 +25,7 @@ pub struct ExplorerConfig {
 /// Database connection configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
-    /// SQLite connection string (e.g., "sqlite://explorer.db").
+    /// SQLite connection string (e.g., "sqlite://tuppira.db").
     pub url: String,
     /// Maximum number of connections in the pool.
     #[serde(default = "default_max_connections")]
@@ -54,27 +52,6 @@ pub struct ApiConfig {
 
 impl ApiConfig {
     /// Returns the full bind address (e.g., "0.0.0.0:8080").
-    pub fn bind(&self) -> String {
-        format!("{}:{}", self.host, self.port)
-    }
-}
-
-/// UI server configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UiConfig {
-    /// Host to bind the UI server to.
-    #[serde(default = "default_ui_host")]
-    pub host: String,
-    /// Port to listen on.
-    #[serde(default = "default_ui_port")]
-    pub port: u16,
-    /// URL of the API server (for frontend fetches).
-    #[serde(default = "default_api_url")]
-    pub api_url: String,
-}
-
-impl UiConfig {
-    /// Returns the full bind address.
     pub fn bind(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
@@ -142,18 +119,6 @@ fn default_api_port() -> u16 {
     8080
 }
 
-fn default_ui_host() -> String {
-    "0.0.0.0".to_string()
-}
-
-fn default_ui_port() -> u16 {
-    3000
-}
-
-fn default_api_url() -> String {
-    "http://localhost:8080".to_string()
-}
-
 fn default_concurrency() -> usize {
     4
 }
@@ -174,12 +139,12 @@ fn default_chain_enabled() -> bool {
 // Loading
 // ---------------------------------------------------------------------------
 
-impl ExplorerConfig {
+impl TuppiraConfig {
     /// Load configuration from a TOML file.
-    pub fn from_file(path: &Path) -> Result<Self, crate::ExplorerError> {
-        let content = std::fs::read_to_string(path).map_err(crate::ExplorerError::Io)?;
-        let config: ExplorerConfig =
-            toml::from_str(&content).map_err(|e| crate::ExplorerError::Toml(e.to_string()))?;
+    pub fn from_file(path: &Path) -> Result<Self, crate::TuppiraError> {
+        let content = std::fs::read_to_string(path).map_err(crate::TuppiraError::Io)?;
+        let config: TuppiraConfig =
+            toml::from_str(&content).map_err(|e| crate::TuppiraError::Toml(e.to_string()))?;
         config
             .with_resolved_rpc_urls()?
             .with_discovered_chains()
@@ -192,7 +157,7 @@ impl ExplorerConfig {
     /// 1. `CONFIG_PATH` environment variable
     /// 2. `config.toml` in the current directory
     /// 3. Built-in defaults
-    pub fn load() -> Result<Self, crate::ExplorerError> {
+    pub fn load() -> Result<Self, crate::TuppiraError> {
         if let Ok(path) = std::env::var("CONFIG_PATH") {
             return Self::from_file(Path::new(&path));
         }
@@ -207,10 +172,10 @@ impl ExplorerConfig {
     }
 
     /// Create a configuration with all defaults values.
-    pub fn default_config() -> Result<Self, crate::ExplorerError> {
-        Ok(ExplorerConfig {
+    pub fn default_config() -> Result<Self, crate::TuppiraError> {
+        Ok(TuppiraConfig {
             database: DatabaseConfig {
-                url: "sqlite://explorer.db".to_string(),
+                url: "sqlite://tuppira.db".to_string(),
                 max_connections: default_max_connections(),
             },
             api: ApiConfig {
@@ -218,11 +183,6 @@ impl ExplorerConfig {
                 port: default_api_port(),
                 cors_origins: Vec::new(),
                 enable_graphql_playground: false,
-            },
-            ui: UiConfig {
-                host: default_ui_host(),
-                port: default_ui_port(),
-                api_url: default_api_url(),
             },
             indexer: IndexerConfig {
                 concurrency: default_concurrency(),
@@ -237,14 +197,14 @@ impl ExplorerConfig {
     /// Validate each profile policy and derive the legacy request URL from its
     /// explicit read-capable endpoint. No URL fallback or transport guessing is
     /// allowed during this migration.
-    fn with_resolved_rpc_urls(mut self) -> Result<Self, crate::ExplorerError> {
+    fn with_resolved_rpc_urls(mut self) -> Result<Self, crate::TuppiraError> {
         for (chain, config) in &mut self.chains {
             config
                 .rpc_policy
                 .validate()
-                .map_err(|error| crate::ExplorerError::Parse(error.to_string()))?;
+                .map_err(|error| crate::TuppiraError::Parse(error.to_string()))?;
             if config.rpc_policy.chain != *chain {
-                return Err(crate::ExplorerError::Parse(format!(
+                return Err(crate::TuppiraError::Parse(format!(
                     "chain profile key {chain} does not match policy chain {}",
                     config.rpc_policy.chain
                 )));
@@ -252,11 +212,11 @@ impl ExplorerConfig {
             let endpoint = config
                 .rpc_policy
                 .candidates(RpcCapability::Read)
-                .map_err(|error| crate::ExplorerError::Parse(error.to_string()))?
+                .map_err(|error| crate::TuppiraError::Parse(error.to_string()))?
                 .into_iter()
                 .next()
                 .ok_or_else(|| {
-                    crate::ExplorerError::Parse(format!(
+                    crate::TuppiraError::Parse(format!(
                         "chain {chain} policy has no read-capable endpoint"
                     ))
                 })?;
@@ -275,17 +235,17 @@ impl ExplorerConfig {
     /// Applies the Compose/operator database URL without requiring a second
     /// configuration file. An empty override is a configuration error rather
     /// than a silent fallback to a different database.
-    fn with_database_url_from_env(self) -> Result<Self, crate::ExplorerError> {
+    fn with_database_url_from_env(self) -> Result<Self, crate::TuppiraError> {
         self.with_database_url_override(std::env::var("DATABASE_URL").ok())
     }
 
     fn with_database_url_override(
         mut self,
         database_url: Option<String>,
-    ) -> Result<Self, crate::ExplorerError> {
+    ) -> Result<Self, crate::TuppiraError> {
         if let Some(url) = database_url {
             if url.trim().is_empty() {
-                return Err(crate::ExplorerError::Parse(
+                return Err(crate::TuppiraError::Parse(
                     "DATABASE_URL must not be empty".to_string(),
                 ));
             }
@@ -307,7 +267,7 @@ fn parse_network(network: &str) -> Network {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         DatabaseConfig {
-            url: "sqlite://explorer.db".to_string(),
+            url: "sqlite://tuppira.db".to_string(),
             max_connections: default_max_connections(),
         }
     }
@@ -320,16 +280,6 @@ impl Default for ApiConfig {
             port: default_api_port(),
             cors_origins: Vec::new(),
             enable_graphql_playground: false,
-        }
-    }
-}
-
-impl Default for UiConfig {
-    fn default() -> Self {
-        UiConfig {
-            host: default_ui_host(),
-            port: default_ui_port(),
-            api_url: default_api_url(),
         }
     }
 }
@@ -364,51 +314,51 @@ impl Default for ChainConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::ExplorerConfig;
+    use super::TuppiraConfig;
     use std::path::Path;
 
-    fn explorer_root() -> std::path::PathBuf {
+    fn tuppira_root() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .expect("shared crate lives under csv-explorer")
+            .expect("shared crate lives under tuppira")
             .to_path_buf()
     }
 
     #[test]
     fn database_url_override_replaces_file_or_default_configuration() {
-        let result = ExplorerConfig::default_config().and_then(|config| {
-            config.with_database_url_override(Some("sqlite:///data/explorer.db".to_string()))
+        let result = TuppiraConfig::default_config().and_then(|config| {
+            config.with_database_url_override(Some("sqlite:///data/tuppira.db".to_string()))
         });
         assert!(
-            matches!(result, Ok(config) if config.database.url == "sqlite:///data/explorer.db")
+            matches!(result, Ok(config) if config.database.url == "sqlite:///data/tuppira.db")
         );
     }
 
     #[test]
     fn empty_database_url_override_fails_closed() {
-        let result = ExplorerConfig::default_config()
+        let result = TuppiraConfig::default_config()
             .and_then(|config| config.with_database_url_override(Some("   ".to_string())));
         assert!(
-            matches!(result, Err(crate::ExplorerError::Parse(message)) if message == "DATABASE_URL must not be empty")
+            matches!(result, Err(crate::TuppiraError::Parse(message)) if message == "DATABASE_URL must not be empty")
         );
     }
 
     #[test]
-    fn every_shipped_explorer_profile_uses_a_valid_canonical_rpc_policy() {
+    fn every_shipped_tuppira_profile_uses_a_valid_canonical_rpc_policy() {
         for profile in [
             "config.toml",
             "config.mainnet.toml",
             "config.testnet.toml",
             "config.example.toml",
         ] {
-            let path = explorer_root().join(profile);
+            let path = tuppira_root().join(profile);
             let contents = std::fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("{profile} must be readable: {error}"));
             assert!(
                 !contents.contains("rpc_url") && !contents.contains("${"),
                 "{profile} must not contain scalar or shell-expanded RPC configuration"
             );
-            let config: ExplorerConfig = toml::from_str(&contents)
+            let config: TuppiraConfig = toml::from_str(&contents)
                 .unwrap_or_else(|error| panic!("{profile} must deserialize: {error}"));
             let config = config
                 .with_resolved_rpc_urls()

@@ -1,9 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["shared", "storage", "indexer", "api", "ui"]
-# The Dioxus UI remains available for restoration work, but the testnet
-# certification baseline is the data plane only.
-default-members = ["shared", "storage", "indexer", "api"]
+members = ["shared", "storage", "indexer", "api"]
 
 [workspace.package]
 version = "0.1.5"
@@ -20,9 +17,6 @@ axum = "0.6"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13"
-dioxus = { version = "0.7", features = ["web"] }
-dioxus-desktop = "0.7"
-dioxus-web = "0.7"
 futures = "0.3"
 hex = "0.4.3"
 lazy_static = "1.4"
@@ -49,4 +43,4 @@ unimplemented = "deny"
 unwrap_used = "deny"
 
 [patch.crates-io]
-spl-token-2022-interface = { path = "../../parwana/third_party/spl-token-2022-interface" }
+spl-token-2022-interface = { path = "../parwana/third_party/spl-token-2022-interface" }

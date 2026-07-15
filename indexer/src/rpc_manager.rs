@@ -13,7 +13,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
-use csv_explorer_shared::ExplorerError;
+use tuppira_shared::TuppiraError;
 
 /// Type of RPC endpoint
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -67,11 +67,11 @@ pub struct RpcConfig {
 
 impl RpcConfig {
     /// Load RPC configuration from a JSON file
-    pub fn from_file(path: &Path) -> Result<Self, ExplorerError> {
-        let content = std::fs::read_to_string(path).map_err(ExplorerError::Io)?;
+    pub fn from_file(path: &Path) -> Result<Self, TuppiraError> {
+        let content = std::fs::read_to_string(path).map_err(TuppiraError::Io)?;
 
         let mut config: Self = serde_json::from_str(&content)
-            .map_err(|e| ExplorerError::Internal(format!("Failed to parse RPC config: {}", e)))?;
+            .map_err(|e| TuppiraError::Internal(format!("Failed to parse RPC config: {}", e)))?;
 
         config.resolve_env_vars();
         Ok(config)
@@ -210,7 +210,7 @@ fn base64_encode(input: &str) -> String {
 }
 
 /// Load RPC configuration from default location
-pub fn load_rpc_config() -> Result<RpcConfig, ExplorerError> {
+pub fn load_rpc_config() -> Result<RpcConfig, TuppiraError> {
     let path = Path::new("rpc_config.json");
     if path.exists() {
         RpcConfig::from_file(path)

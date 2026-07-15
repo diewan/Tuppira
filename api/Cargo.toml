@@ -1,20 +1,20 @@
 [package]
-name = "csv-explorer-api"
+name = "tuppira-api"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "csv-explorer-api"
+name = "tuppira-api"
 path = "src/main.rs"
 
 [lints]
 workspace = true
 
 [dependencies]
-csv-explorer-shared = { path = "../shared" }
-csv-explorer-storage = { path = "../storage" }
-csv-explorer-indexer = { path = "../indexer" }
+tuppira-shared = { path = "../shared" }
+tuppira-storage = { path = "../storage" }
+tuppira-indexer = { path = "../indexer" }
 tokio.workspace = true
 futures.workspace = true
 axum.workspace = true

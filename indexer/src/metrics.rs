@@ -1,4 +1,4 @@
-/// Prometheus metrics for the CSV Explorer indexer.
+/// Prometheus metrics for the Tuppira indexer.
 ///
 /// Exposes counters, gauges, and histograms for monitoring indexer health
 /// and performance.
@@ -14,7 +14,7 @@ lazy_static! {
     /// Counter for total blocks indexed per chain.
     pub static ref BLOCKS_INDEXED_TOTAL: Result<CounterVec, prometheus::Error> = CounterVec::new(
         prometheus::Opts::new(
-            "csv_indexer_blocks_indexed_total",
+            "tuppira_indexer_blocks_indexed_total",
             "Total number of blocks indexed per chain"
         ),
         &["chain"]
@@ -23,7 +23,7 @@ lazy_static! {
     /// Counter for total sanads indexed per chain.
     pub static ref SANADS_INDEXED_TOTAL: Result<CounterVec, prometheus::Error> = CounterVec::new(
         prometheus::Opts::new(
-            "csv_indexer_sanads_indexed_total",
+            "tuppira_indexer_sanads_indexed_total",
             "Total number of sanads indexed per chain"
         ),
         &["chain"]
@@ -32,7 +32,7 @@ lazy_static! {
     /// Counter for total seals indexed per chain.
     pub static ref SEALS_INDEXED_TOTAL: Result<CounterVec, prometheus::Error> = CounterVec::new(
         prometheus::Opts::new(
-            "csv_indexer_seals_indexed_total",
+            "tuppira_indexer_seals_indexed_total",
             "Total number of seals indexed per chain"
         ),
         &["chain"]
@@ -41,7 +41,7 @@ lazy_static! {
     /// Counter for total transfers indexed per chain.
     pub static ref TRANSFERS_INDEXED_TOTAL: Result<CounterVec, prometheus::Error> = CounterVec::new(
         prometheus::Opts::new(
-            "csv_indexer_transfers_indexed_total",
+            "tuppira_indexer_transfers_indexed_total",
             "Total number of transfers indexed per chain"
         ),
         &["chain"]
@@ -50,7 +50,7 @@ lazy_static! {
     /// Counter for total contracts indexed per chain.
     pub static ref CONTRACTS_INDEXED_TOTAL: Result<CounterVec, prometheus::Error> = CounterVec::new(
         prometheus::Opts::new(
-            "csv_indexer_contracts_indexed_total",
+            "tuppira_indexer_contracts_indexed_total",
             "Total number of contracts indexed per chain"
         ),
         &["chain"]
@@ -59,7 +59,7 @@ lazy_static! {
     /// Gauge for current sync lag (blocks behind tip) per chain.
     pub static ref SYNC_LAG_SECONDS: Result<GaugeVec, prometheus::Error> = GaugeVec::new(
         prometheus::Opts::new(
-            "csv_indexer_sync_lag_seconds",
+            "tuppira_indexer_sync_lag_seconds",
             "Sync lag in seconds behind chain tip"
         ),
         &["chain"]
@@ -68,7 +68,7 @@ lazy_static! {
     /// Counter for total errors per chain.
     pub static ref ERRORS_TOTAL: Result<CounterVec, prometheus::Error> = CounterVec::new(
         prometheus::Opts::new(
-            "csv_indexer_errors_total",
+            "tuppira_indexer_errors_total",
             "Total number of errors encountered per chain"
         ),
         &["chain", "error_type"]
@@ -77,7 +77,7 @@ lazy_static! {
     /// Histogram for block processing time.
     pub static ref BLOCK_PROCESSING_DURATION: Result<HistogramVec, prometheus::Error> = HistogramVec::new(
         HistogramOpts::new(
-            "csv_indexer_block_processing_duration_seconds",
+            "tuppira_indexer_block_processing_duration_seconds",
             "Time to process a single block"
         ),
         &["chain"]
@@ -86,7 +86,7 @@ lazy_static! {
     /// Gauge for the latest block number indexed per chain.
     pub static ref LATEST_BLOCK: Result<GaugeVec, prometheus::Error> = GaugeVec::new(
         prometheus::Opts::new(
-            "csv_indexer_latest_block",
+            "tuppira_indexer_latest_block",
             "Latest block number indexed per chain"
         ),
         &["chain"]

@@ -16,9 +16,9 @@ use std::collections::HashMap;
 
 use super::chain_indexer::{AddressIndexingResult, ChainIndexer, ChainResult};
 use super::rpc_manager::RpcManager;
-use csv_explorer_shared::{
+use tuppira_shared::{
     ChainConfig, CommitmentScheme, ContractStatus, ContractType, CsvContract, EnhancedSanadRecord,
-    EnhancedSealRecord, EnhancedTransferRecord, ExplorerError, FinalityProofType,
+    EnhancedSealRecord, EnhancedTransferRecord, TuppiraError, FinalityProofType,
     InclusionProofType, Network, PriorityLevel, SanadRecord, SealRecord, SealStatus, SealType,
     TransferRecord,
 };
@@ -135,11 +135,11 @@ impl ChainIndexer for EthereumIndexer {
         Ok(())
     }
 
-    async fn index_explorer_events(
+    async fn index_tuppira_events(
         &self,
         block: u64,
-    ) -> ChainResult<Vec<csv_explorer_shared::ExplorerEventDto>> {
-        Err(ExplorerError::BlockError {
+    ) -> ChainResult<Vec<tuppira_shared::TuppiraEventDto>> {
+        Err(TuppiraError::BlockError {
             chain: self.chain_id().to_string(),
             block,
             message: "canonical Ethereum event decoder is not configured".to_string(),
@@ -159,7 +159,7 @@ impl ChainIndexer for EthereumIndexer {
             let hex_str = result.as_str().unwrap_or("0x0");
             Ok(u64::from_str_radix(hex_str.trim_start_matches("0x"), 16).unwrap_or(0))
         } else {
-            Err(ExplorerError::RpcError {
+            Err(TuppiraError::RpcError {
                 chain: "ethereum".to_string(),
                 message: "Failed to get block number".to_string(),
             })
@@ -447,7 +447,7 @@ impl EthereumIndexer {
 
         if let Some(result) = resp.result {
             let logs: Vec<LogData> =
-                serde_json::from_value(result).map_err(|e| ExplorerError::RpcParseError {
+                serde_json::from_value(result).map_err(|e| TuppiraError::RpcParseError {
                     chain: "ethereum".to_string(),
                     message: e.to_string(),
                 })?;
@@ -504,7 +504,7 @@ impl EthereumIndexer {
             owner,
             created_at: chrono::Utc::now(),
             created_tx: log.transaction_hash.clone(),
-            status: csv_explorer_shared::SanadStatus::Active,
+            status: tuppira_shared::SanadStatus::Active,
             metadata: Some(serde_json::json!({
                 "protocol_id": "csv-eth",
                 "commitment_scheme": "kzg",
@@ -552,11 +552,15 @@ impl EthereumIndexer {
             lock_tx: log.transaction_hash.clone(),
             mint_tx: None,
             proof_ref: Some(log.transaction_hash.clone()),
-            status: csv_explorer_shared::TransferStatus::Initiated,
+            status: tuppira_shared::TransferStatus::Initiated,
             created_at: chrono::Utc::now(),
             completed_at: None,
             duration_ms: None,
-            lock_tx_explorer_url: None,
+            lock_tx_explorer_url: tuppira_shared::block_explorer::tx_url(
+                "ethereum",
+                self.config.network,
+                &log.transaction_hash,
+            ),
             mint_tx_explorer_url: None,
         })
     }

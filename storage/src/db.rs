@@ -7,7 +7,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 
-use csv_explorer_shared::{ExplorerError, Result};
+use tuppira_shared::{TuppiraError, Result};
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
@@ -17,7 +17,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
 /// Initialize the database connection pool and apply schema.
 pub async fn init_pool(database_url: &str, max_connections: u32) -> Result<SqlitePool> {
     let options = SqliteConnectOptions::from_str(database_url)
-        .map_err(|error| ExplorerError::Migration(format!("invalid database URL: {error}")))?
+        .map_err(|error| TuppiraError::Migration(format!("invalid database URL: {error}")))?
         .create_if_missing(true)
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal);
@@ -38,12 +38,12 @@ pub async fn init_pool(database_url: &str, max_connections: u32) -> Result<Sqlit
 /// migration ledger is rejected: guessing its schema version is unsafe.
 async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS _csv_explorer_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS _tuppira_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
     )
     .execute(pool)
     .await?;
 
-    let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _csv_explorer_migrations")
+    let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _tuppira_migrations")
         .fetch_one(pool)
         .await?;
     let has_read_model: i64 = sqlx::query_scalar(
@@ -52,7 +52,7 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
     .fetch_one(pool)
     .await?;
     if applied == 0 && has_read_model != 0 {
-        return Err(ExplorerError::Migration(
+        return Err(TuppiraError::Migration(
             "database has explorer tables but no migration ledger; rebuild it from canonical chain data"
                 .to_string(),
         ));
@@ -60,7 +60,7 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
 
     for (version, sql) in MIGRATIONS {
         let exists: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM _csv_explorer_migrations WHERE version = ?")
+            sqlx::query_scalar("SELECT COUNT(*) FROM _tuppira_migrations WHERE version = ?")
                 .bind(version)
                 .fetch_one(pool)
                 .await?;
@@ -70,7 +70,7 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
 
         let mut transaction = pool.begin().await?;
         sqlx::raw_sql(sql).execute(&mut *transaction).await?;
-        sqlx::query("INSERT INTO _csv_explorer_migrations (version) VALUES (?)")
+        sqlx::query("INSERT INTO _tuppira_migrations (version) VALUES (?)")
             .bind(version)
             .execute(&mut *transaction)
             .await?;
@@ -101,7 +101,7 @@ mod tests {
             Err(_) => return,
         };
         let count: Result<i64, sqlx::Error> =
-            sqlx::query_scalar("SELECT COUNT(*) FROM _csv_explorer_migrations")
+            sqlx::query_scalar("SELECT COUNT(*) FROM _tuppira_migrations")
                 .fetch_one(&pool)
                 .await;
         assert!(matches!(count, Ok(2)));
@@ -122,7 +122,7 @@ mod tests {
         let result = super::apply_migrations(&pool).await;
         assert!(matches!(
             result,
-            Err(csv_explorer_shared::ExplorerError::Migration(_))
+            Err(tuppira_shared::TuppiraError::Migration(_))
         ));
     }
 }

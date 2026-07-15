@@ -1,9 +1,12 @@
 pub mod advanced_types;
-/// Shared types and configuration for the CSV Explorer.
+/// Shared types and configuration for the Tuppira.
 ///
 /// This crate contains all the data types shared across the indexer,
-/// storage, API, and UI crates.
+/// storage, and API crates.
 pub mod types;
+
+/// Official block-explorer link construction for the chains Parwana touches.
+pub mod block_explorer;
 
 // Re-export commonly used types at the crate root for convenience.
 pub use advanced_types::*;
@@ -15,6 +18,6 @@ pub mod config;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod error;
 #[cfg(not(target_arch = "wasm32"))]
-pub use config::{ApiConfig, ChainConfig, ExplorerConfig};
+pub use config::{ApiConfig, ChainConfig, TuppiraConfig};
 #[cfg(not(target_arch = "wasm32"))]
-pub use error::{ExplorerError, Result};
+pub use error::{TuppiraError, Result};

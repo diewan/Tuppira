@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use super::chain_indexer::{AddressIndexingResult, ChainIndexer, ChainResult};
 use super::rpc_manager::RpcManager;
-use csv_explorer_shared::{
+use tuppira_shared::{
     ChainConfig, CommitmentScheme, ContractStatus, ContractType, CsvContract, EnhancedSanadRecord,
-    EnhancedSealRecord, EnhancedTransferRecord, ExplorerError, FinalityProofType,
+    EnhancedSealRecord, EnhancedTransferRecord, TuppiraError, FinalityProofType,
     InclusionProofType, Network, PriorityLevel, SanadRecord, SealRecord, SealStatus, SealType,
     TransferRecord,
 };
@@ -64,11 +64,11 @@ impl ChainIndexer for SolanaIndexer {
         Ok(())
     }
 
-    async fn index_explorer_events(
+    async fn index_tuppira_events(
         &self,
         block: u64,
-    ) -> ChainResult<Vec<csv_explorer_shared::ExplorerEventDto>> {
-        Err(ExplorerError::BlockError {
+    ) -> ChainResult<Vec<tuppira_shared::TuppiraEventDto>> {
+        Err(TuppiraError::BlockError {
             chain: self.chain_id().to_string(),
             block,
             message: "canonical Solana event decoder is not configured".to_string(),
@@ -95,7 +95,7 @@ impl ChainIndexer for SolanaIndexer {
             Ok(slot)
         } else {
             let err = resp.error.map(|e| e.to_string()).unwrap_or_default();
-            Err(ExplorerError::RpcError {
+            Err(TuppiraError::RpcError {
                 chain: "solana".to_string(),
                 message: format!("getSlot failed: {}", err),
             })
@@ -379,7 +379,7 @@ impl SolanaIndexer {
         };
 
         let resp: SolanaRpcResponse = match client.post(&url).json(&req).send().await {
-            Ok(r) => r.json().await.map_err(|e| ExplorerError::RpcParseError {
+            Ok(r) => r.json().await.map_err(|e| TuppiraError::RpcParseError {
                 chain: "solana".to_string(),
                 message: e.to_string(),
             })?,
@@ -456,7 +456,7 @@ impl SolanaIndexer {
             owner: "unknown".to_string(),
             created_at: chrono::Utc::now(),
             created_tx: sig,
-            status: csv_explorer_shared::SanadStatus::Active,
+            status: tuppira_shared::SanadStatus::Active,
             metadata: Some(serde_json::json!({
                 "protocol_id": "csv-sol",
                 "commitment_scheme": "hash_based",
@@ -510,12 +510,16 @@ impl SolanaIndexer {
             to_owner: "unknown".to_string(),
             lock_tx: sig.clone(),
             mint_tx: None,
-            proof_ref: Some(sig),
-            status: csv_explorer_shared::TransferStatus::Initiated,
+            proof_ref: Some(sig.clone()),
+            status: tuppira_shared::TransferStatus::Initiated,
             created_at: chrono::Utc::now(),
             completed_at: None,
             duration_ms: None,
-            lock_tx_explorer_url: None,
+            lock_tx_explorer_url: tuppira_shared::block_explorer::tx_url(
+                "solana",
+                self.config.network,
+                &sig,
+            ),
             mint_tx_explorer_url: None,
         })
     }

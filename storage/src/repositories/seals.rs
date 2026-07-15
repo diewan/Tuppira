@@ -2,7 +2,7 @@
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 
-use csv_explorer_shared::{Result, SealFilter, SealRecord, SealStatus, SealType};
+use tuppira_shared::{Result, SealFilter, SealRecord, SealStatus, SealType};
 
 /// Typed repository for the `seals` table.
 #[derive(Clone)]

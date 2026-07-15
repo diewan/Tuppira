@@ -1,16 +1,26 @@
-# CSV Explorer
+# Tuppira
 
-A high-performance multi-chain indexer and explorer UI for CSV (Cross-Chain Sealed Verifiable) sanads, built entirely in Rust with Dioxus for the UI.
+Tuppira is the **indexer for the Parwana protocol** — built entirely in Rust.
+
+It is deliberately *not* an all-in-one block explorer. Tuppira traces only the
+transactions, contracts, and accounts that belong to Parwana (CSV — Cross-Chain
+Sealed Verifiable — sanads, seals, transfers, and contracts). For any
+visualization deeper than that protocol-scoped data, it links out to each
+chain's **official** block explorer rather than reproducing it, fetching only
+the data Parwana needs. This keeps the focus on the protocol instead of chasing
+the deepest all-chain user experience.
+
+The developer-facing UI (explorer, wallet, and protocol debugger) is
+[Hemion](../hemion); Tuppira is the data layer beneath it.
 
 ## Architecture
 
 ```
-csv-explorer/
+tuppira/
 ├── shared/      # Shared types, config, and error definitions
 ├── storage/     # SQLite database layer with repository pattern
 ├── indexer/     # Multi-chain indexing daemon (Bitcoin, Ethereum, Sui, Aptos, Solana)
 ├── api/         # GraphQL + REST API for querying indexed data
-├── ui/          # Dioxus multiplatform UI (web + desktop)
 ├── Dockerfile
 ├── docker-compose.yml
 └── config.example.toml
@@ -18,11 +28,10 @@ csv-explorer/
 
 ### Components
 
-- **Shared** - Core explorer types (`SanadRecord`, `TransferRecord`, `SealRecord`, `CsvContract`), configuration, and error handling
+- **Shared** - Core Tuppira types (`SanadRecord`, `TransferRecord`, `SealRecord`, `CsvContract`), configuration, error handling, and the network-aware `block_explorer` link builder
 - **Storage** - SQLite database with typed repositories for all entity types, sync progress tracking, and aggregate statistics
 - **Indexer** - Chain-agnostic indexing daemon with pluggable `ChainIndexer` trait implementations for Bitcoin, Ethereum, Sui, Aptos, and Solana
-- **API** - GraphQL API (primary) + REST API (secondary) with flexible querying, pagination, and filtering
-- **UI** - Dioxus fullstack application supporting both web and desktop targets with responsive design, dark mode, and keyboard navigation
+- **API** - GraphQL API (primary) + REST API (secondary) for querying the indexed Parwana data, with pagination and filtering
 
 ## Quick Start
 
@@ -38,16 +47,10 @@ csv-explorer/
 cargo build --workspace
 
 # Run indexer
-cargo run -p csv-explorer-indexer -- start
+cargo run -p tuppira-indexer -- start
 
 # Run API server
-cargo run -p csv-explorer-api -- start
-
-# Run UI (web)
-cargo run -p csv-explorer-ui -- serve
-
-# Run UI (desktop)
-cargo run -p csv-explorer-ui -- desktop
+cargo run -p tuppira-api -- start
 ```
 
 ### Docker
@@ -68,7 +71,6 @@ Key configuration sections:
 
 - `[database]` - SQLite connection string
 - `[api]` - API server host/port
-- `[ui]` - UI server host/port
 - `[indexer]` - Concurrency, batch size, poll interval
 - `[chains.*]` - Per-chain RPC URLs, networks, start blocks
 
@@ -122,7 +124,18 @@ Endpoints:
 
 ## Indexer
 
-The indexer runs as a daemon that continuously polls each enabled chain for CSV-related data.
+The indexer runs as a daemon that continuously polls each enabled chain for
+Parwana protocol data only — it does not index unrelated chain activity.
+
+### Official explorer link-outs
+
+Tuppira does not render deep per-chain views. Instead, `tuppira_shared::block_explorer`
+builds network-aware links to each chain's official explorer
+(`tx_url`, `address_url`, `contract_url`). Links are populated at index time for
+transactions and served by the API; the same builder is reused by Hemion. When a
+`(chain, network)` pair has no public explorer — e.g. a local devnet or Bitcoin
+regtest — the builder returns `None` and the field is omitted rather than
+fabricated.
 
 ### Supported Chains
 
@@ -137,22 +150,12 @@ The indexer runs as a daemon that continuously polls each enabled chain for CSV-
 ### Commands
 
 ```bash
-csv-explorer-indexer start          # Start the indexer daemon
-csv-explorer-indexer status         # Show current indexer status
-csv-explorer-indexer sync <chain>   # Force sync a specific chain
-csv-explorer-indexer reindex        # Reindex from a specific block
-csv-explorer-indexer reset          # Reset sync progress
+tuppira-indexer start          # Start the indexer daemon
+tuppira-indexer status         # Show current indexer status
+tuppira-indexer sync <chain>   # Force sync a specific chain
+tuppira-indexer reindex        # Reindex from a specific block
+tuppira-indexer reset          # Reset sync progress
 ```
-
-## Wallet Integration
-
-The UI supports CSV wallet connection for:
-
-- Viewing connected wallet sanads
-- Quick transfer initiation
-- Balance display
-
-Wallet integration uses the CSV SDK connection protocol.
 
 ## Deployment
 
@@ -166,17 +169,17 @@ docker compose -f docker-compose.yml up -d
 
 1. Build release binaries: `cargo build --release --workspace`
 2. Configure `config.toml` with production RPC endpoints
-3. Start services in order: indexer -> api -> ui
+3. Start services in order: indexer -> api
 
 ## Metrics
 
 Prometheus metrics are exposed at `/metrics` on the API server:
 
-- `csv_indexer_blocks_indexed_total` - Total blocks indexed per chain
-- `csv_indexer_sanads_indexed_total` - Total sanads indexed
-- `csv_indexer_transfers_indexed_total` - Total transfers indexed
-- `csv_indexer_sync_lag_seconds` - Sync lag per chain
-- `csv_indexer_errors_total` - Error counts
+- `tuppira_indexer_blocks_indexed_total` - Total blocks indexed per chain
+- `tuppira_indexer_sanads_indexed_total` - Total sanads indexed
+- `tuppira_indexer_transfers_indexed_total` - Total transfers indexed
+- `tuppira_indexer_sync_lag_seconds` - Sync lag per chain
+- `tuppira_indexer_errors_total` - Error counts
 
 ## License
 

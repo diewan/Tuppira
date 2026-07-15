@@ -13,14 +13,14 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 
 use super::chain_indexer::{AddressIndexingResult, BlockIndexResult, ChainIndexer, ChainResult};
-use csv_explorer_shared::{
+use tuppira_shared::{
     ChainConfig, ChainInfo, ChainStatus, CommitmentScheme, CsvContract, EnhancedSanadRecord,
-    EnhancedSealRecord, EnhancedTransferRecord, ExplorerError, ExplorerEventDto, FinalityProofType,
+    EnhancedSealRecord, EnhancedTransferRecord, TuppiraError, TuppiraEventDto, FinalityProofType,
     InclusionProofType, IndexerStatus, Network, PriorityLevel, SanadRecord, SealRecord,
     TransferRecord,
 };
 
-use csv_explorer_storage::repositories::{
+use tuppira_storage::repositories::{
     AdvancedProofRepository, ContractsRepository, SanadsRepository, SealsRepository,
     SyncRepository, TransfersRepository,
 };
@@ -123,8 +123,8 @@ impl ChainIndexer for SyncedChainIndexer {
         self.inner.index_contracts(block).await
     }
 
-    async fn index_explorer_events(&self, block: u64) -> ChainResult<Vec<ExplorerEventDto>> {
-        self.inner.index_explorer_events(block).await
+    async fn index_tuppira_events(&self, block: u64) -> ChainResult<Vec<TuppiraEventDto>> {
+        self.inner.index_tuppira_events(block).await
     }
 
     async fn process_block(&self, block: u64) -> ChainResult<BlockIndexResult> {
@@ -276,7 +276,7 @@ impl SyncCoordinator {
     pub async fn initialize(
         &self,
         chain_configs: &std::collections::HashMap<String, ChainConfig>,
-    ) -> Result<(), ExplorerError> {
+    ) -> Result<(), TuppiraError> {
         for indexer in &self.indexers {
             if let Some(config) = chain_configs.get(indexer.chain_id()) {
                 if config.enabled {
@@ -289,7 +289,7 @@ impl SyncCoordinator {
     }
 
     /// Start the sync loop for all enabled chains.
-    pub async fn start(&self) -> Result<(), ExplorerError> {
+    pub async fn start(&self) -> Result<(), TuppiraError> {
         let mut running = self.running.write().await;
         if *running {
             return Ok(());
@@ -376,7 +376,7 @@ impl SyncCoordinator {
     }
 
     /// Stop the sync loop.
-    pub async fn stop(&self) -> Result<(), ExplorerError> {
+    pub async fn stop(&self) -> Result<(), TuppiraError> {
         let mut running = self.running.write().await;
         *running = false;
         tracing::info!("Stopping sync coordinator");
@@ -394,7 +394,7 @@ impl SyncCoordinator {
                     .chain_configs
                     .get(&state.chain_id)
                     .map(|c| c.network)
-                    .unwrap_or(csv_explorer_shared::Network::Mainnet);
+                    .unwrap_or(tuppira_shared::Network::Mainnet);
 
                 let sync_lag = 0u64; // Calculated from chain tip - latest_block during active sync
 
@@ -423,7 +423,7 @@ impl SyncCoordinator {
     }
 
     /// Force sync a specific chain.
-    pub async fn sync_chain(&self, chain_id: &str) -> Result<(), ExplorerError> {
+    pub async fn sync_chain(&self, chain_id: &str) -> Result<(), TuppiraError> {
         self.sync_chain_from(chain_id, None).await
     }
 
@@ -432,7 +432,7 @@ impl SyncCoordinator {
         &self,
         chain_id: &str,
         from_block: u64,
-    ) -> Result<(), ExplorerError> {
+    ) -> Result<(), TuppiraError> {
         self.sync_chain_from(chain_id, Some(from_block)).await
     }
 
@@ -441,12 +441,12 @@ impl SyncCoordinator {
         &self,
         chain_id: &str,
         override_start_block: Option<u64>,
-    ) -> Result<(), ExplorerError> {
+    ) -> Result<(), TuppiraError> {
         let indexer = self
             .indexers
             .iter()
             .find(|idx| idx.chain_id() == chain_id)
-            .ok_or_else(|| ExplorerError::Internal(format!("Chain {} not found", chain_id)))?;
+            .ok_or_else(|| TuppiraError::Internal(format!("Chain {} not found", chain_id)))?;
 
         let chain_config = self.chain_configs.get(chain_id);
 
@@ -476,7 +476,7 @@ impl SyncCoordinator {
     }
 
     /// Reindex a chain from a specific block.
-    pub async fn reindex_from(&self, chain_id: &str, from_block: u64) -> Result<(), ExplorerError> {
+    pub async fn reindex_from(&self, chain_id: &str, from_block: u64) -> Result<(), TuppiraError> {
         // Reset sync progress for this chain
         self.sync_repo.reset(chain_id).await?;
 
@@ -485,7 +485,7 @@ impl SyncCoordinator {
     }
 
     /// Reset sync progress for all chains.
-    pub async fn reset_sync(&self) -> Result<(), ExplorerError> {
+    pub async fn reset_sync(&self) -> Result<(), TuppiraError> {
         self.sync_repo.reset_all().await?;
         Ok(())
     }
@@ -542,7 +542,7 @@ impl SyncContext {
 }
 
 /// Sync a single chain from its last synced position.
-async fn sync_chain(indexer: &dyn ChainIndexer, ctx: &SyncContext) -> Result<(), ExplorerError> {
+async fn sync_chain(indexer: &dyn ChainIndexer, ctx: &SyncContext) -> Result<(), TuppiraError> {
     let chain_id = indexer.chain_id();
 
     // Get last synced block from database
@@ -601,11 +601,11 @@ async fn sync_chain(indexer: &dyn ChainIndexer, ctx: &SyncContext) -> Result<(),
         // Canonical event decoding is the only ingestion boundary. In
         // particular, do not fall back to the legacy record builders: they
         // manufacture ownership, timestamps, and deployment state.
-        let events = indexer.index_explorer_events(current).await?;
+        let events = indexer.index_tuppira_events(current).await?;
         for event in &events {
             event
                 .validate()
-                .map_err(|message| ExplorerError::BlockError {
+                .map_err(|message| TuppiraError::BlockError {
                     chain: chain_id.to_string(),
                     block: current,
                     message,

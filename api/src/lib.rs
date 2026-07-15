@@ -1,5 +1,5 @@
 pub mod feed;
-/// API server for the CSV Explorer.
+/// API server for the Tuppira.
 ///
 /// Provides GraphQL and REST APIs for querying indexed data.
 pub mod graphql;

@@ -1,15 +1,10 @@
 [database]
-url = "sqlite://data/explorer.db"
+url = "sqlite://data/tuppira.db"
 max_connections = 10
 
 [api]
 host = "0.0.0.0"
 port = 8080
-
-[ui]
-host = "0.0.0.0"
-port = 3000
-api_url = "http://localhost:8080"
 
 [indexer]
 concurrency = 4

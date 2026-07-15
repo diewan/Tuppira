@@ -1,4 +1,4 @@
-/// GraphQL type mappings and input types for the CSV Explorer API.
+/// GraphQL type mappings and input types for the Tuppira API.
 use async_graphql::*;
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
@@ -75,8 +75,8 @@ pub struct WalletFeedEnvelopeGql {
     pub reorg_replaces_observation_id: Option<String>,
 }
 
-impl From<csv_explorer_shared::WalletFeedEnvelope> for WalletFeedEnvelopeGql {
-    fn from(value: csv_explorer_shared::WalletFeedEnvelope) -> Self {
+impl From<tuppira_shared::WalletFeedEnvelope> for WalletFeedEnvelopeGql {
+    fn from(value: tuppira_shared::WalletFeedEnvelope) -> Self {
         Self {
             schema_version: value.schema_version as i32,
             protocol_version: value.protocol_version,
@@ -121,8 +121,8 @@ pub struct Sanad {
     pub last_transfer_at: Option<DateTimeScalar>,
 }
 
-impl From<csv_explorer_shared::SanadRecord> for Sanad {
-    fn from(r: csv_explorer_shared::SanadRecord) -> Self {
+impl From<tuppira_shared::SanadRecord> for Sanad {
+    fn from(r: tuppira_shared::SanadRecord) -> Self {
         Self {
             id: r.id,
             chain: r.chain,
@@ -157,8 +157,8 @@ pub struct Transfer {
     pub duration_ms: Option<i64>,
 }
 
-impl From<csv_explorer_shared::TransferRecord> for Transfer {
-    fn from(t: csv_explorer_shared::TransferRecord) -> Self {
+impl From<tuppira_shared::TransferRecord> for Transfer {
+    fn from(t: tuppira_shared::TransferRecord) -> Self {
         Self {
             id: t.id,
             sanad_id: t.sanad_id,
@@ -191,8 +191,8 @@ pub struct Seal {
     pub block_height: i64,
 }
 
-impl From<csv_explorer_shared::SealRecord> for Seal {
-    fn from(s: csv_explorer_shared::SealRecord) -> Self {
+impl From<tuppira_shared::SealRecord> for Seal {
+    fn from(s: tuppira_shared::SealRecord) -> Self {
         Self {
             id: s.id,
             chain: s.chain,
@@ -220,8 +220,8 @@ pub struct CsvContractGql {
     pub status: String,
 }
 
-impl From<csv_explorer_shared::CsvContract> for CsvContractGql {
-    fn from(c: csv_explorer_shared::CsvContract) -> Self {
+impl From<tuppira_shared::CsvContract> for CsvContractGql {
+    fn from(c: tuppira_shared::CsvContract) -> Self {
         Self {
             id: c.id,
             chain: c.chain,
@@ -248,8 +248,8 @@ pub struct ChainInfoGql {
     pub sync_lag: i64,
 }
 
-impl From<csv_explorer_shared::ChainInfo> for ChainInfoGql {
-    fn from(c: csv_explorer_shared::ChainInfo) -> Self {
+impl From<tuppira_shared::ChainInfo> for ChainInfoGql {
+    fn from(c: tuppira_shared::ChainInfo) -> Self {
         Self {
             id: c.id,
             name: c.name,
@@ -274,8 +274,8 @@ pub struct Stats {
     pub average_transfer_time_ms: Option<i64>,
 }
 
-impl From<csv_explorer_shared::ExplorerStats> for Stats {
-    fn from(s: csv_explorer_shared::ExplorerStats) -> Self {
+impl From<tuppira_shared::TuppiraStats> for Stats {
+    fn from(s: tuppira_shared::TuppiraStats) -> Self {
         Self {
             total_sanads: s.total_sanads as i64,
             total_transfers: s.total_transfers as i64,
@@ -459,8 +459,8 @@ pub struct EnhancedSanad {
     pub confirmations: Option<i64>,
 }
 
-impl From<csv_explorer_shared::EnhancedSanadRecord> for EnhancedSanad {
-    fn from(r: csv_explorer_shared::EnhancedSanadRecord) -> Self {
+impl From<tuppira_shared::EnhancedSanadRecord> for EnhancedSanad {
+    fn from(r: tuppira_shared::EnhancedSanadRecord) -> Self {
         Self {
             id: r.id,
             chain: r.chain,
@@ -499,8 +499,8 @@ pub struct EnhancedSeal {
     pub seal_proof_verified: Option<bool>,
 }
 
-impl From<csv_explorer_shared::EnhancedSealRecord> for EnhancedSeal {
-    fn from(s: csv_explorer_shared::EnhancedSealRecord) -> Self {
+impl From<tuppira_shared::EnhancedSealRecord> for EnhancedSeal {
+    fn from(s: tuppira_shared::EnhancedSealRecord) -> Self {
         Self {
             id: s.id,
             chain: s.chain,
@@ -528,8 +528,8 @@ pub struct ProofStatisticsGql {
     pub seals_by_proof_type: Vec<SealProofCountGql>,
 }
 
-impl From<csv_explorer_shared::ProofStatistics> for ProofStatisticsGql {
-    fn from(s: csv_explorer_shared::ProofStatistics) -> Self {
+impl From<tuppira_shared::ProofStatistics> for ProofStatisticsGql {
+    fn from(s: tuppira_shared::ProofStatistics) -> Self {
         Self {
             total_sanads: s.total_sanads as i64,
             total_seals: s.total_seals as i64,
@@ -564,8 +564,8 @@ pub struct SchemeCountGql {
     pub count: i64,
 }
 
-impl From<csv_explorer_shared::SchemeCount> for SchemeCountGql {
-    fn from(c: csv_explorer_shared::SchemeCount) -> Self {
+impl From<tuppira_shared::SchemeCount> for SchemeCountGql {
+    fn from(c: tuppira_shared::SchemeCount) -> Self {
         Self {
             scheme: format!("{:?}", c.scheme),
             count: c.count as i64,
@@ -580,8 +580,8 @@ pub struct InclusionProofCountGql {
     pub count: i64,
 }
 
-impl From<csv_explorer_shared::InclusionProofCount> for InclusionProofCountGql {
-    fn from(c: csv_explorer_shared::InclusionProofCount) -> Self {
+impl From<tuppira_shared::InclusionProofCount> for InclusionProofCountGql {
+    fn from(c: tuppira_shared::InclusionProofCount) -> Self {
         Self {
             proof_type: format!("{:?}", c.proof_type),
             count: c.count as i64,
@@ -596,8 +596,8 @@ pub struct FinalityProofCountGql {
     pub count: i64,
 }
 
-impl From<csv_explorer_shared::FinalityProofCount> for FinalityProofCountGql {
-    fn from(c: csv_explorer_shared::FinalityProofCount) -> Self {
+impl From<tuppira_shared::FinalityProofCount> for FinalityProofCountGql {
+    fn from(c: tuppira_shared::FinalityProofCount) -> Self {
         Self {
             proof_type: format!("{:?}", c.proof_type),
             count: c.count as i64,
@@ -612,8 +612,8 @@ pub struct SealProofCountGql {
     pub count: i64,
 }
 
-impl From<csv_explorer_shared::SealProofCount> for SealProofCountGql {
-    fn from(c: csv_explorer_shared::SealProofCount) -> Self {
+impl From<tuppira_shared::SealProofCount> for SealProofCountGql {
+    fn from(c: tuppira_shared::SealProofCount) -> Self {
         Self {
             proof_type: c.proof_type,
             count: c.count as i64,

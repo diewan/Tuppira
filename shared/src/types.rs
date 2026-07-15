@@ -1,4 +1,4 @@
-/// Core explorer types for the CSV Explorer.
+/// Core explorer types for the Tuppira.
 ///
 /// This module defines all the data types used across the explorer,
 /// including sanads, transfers, seals, contracts, and chain information.
@@ -379,7 +379,7 @@ pub struct ContractFilter {
 
 /// Aggregate statistics for the explorer.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ExplorerStats {
+pub struct TuppiraStats {
     pub total_sanads: u64,
     pub total_transfers: u64,
     pub total_seals: u64,
@@ -509,7 +509,7 @@ pub struct IndexingActivity {
 
 /// Schema version for explorer event responses. This is intentionally separate
 /// from the canonical protocol codec version.
-pub const EXPLORER_EVENT_SCHEMA_VERSION: u16 = 1;
+pub const TUPPIRA_EVENT_SCHEMA_VERSION: u16 = 1;
 
 /// Schema version for the wallet-facing explorer feed.  This version is
 /// independent of both the protocol codec and the event DTO schema so clients
@@ -584,9 +584,9 @@ pub struct WalletFeedEnvelope {
     pub network: Network,
     pub observed_block: ObservedBlock,
     pub freshness: IndexerFreshness,
-    pub finality: ExplorerFinality,
+    pub finality: TuppiraFinality,
     pub provenance: FeedProvenance,
-    pub event: ExplorerEventDto,
+    pub event: TuppiraEventDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reorg_replacement: Option<ReorgReplacement>,
 }
@@ -648,7 +648,7 @@ pub struct WalletFeedProjection {
     last_sequence: u64,
     envelopes: std::collections::BTreeMap<u64, WalletFeedEnvelope>,
     observation_sequences: std::collections::HashMap<String, u64>,
-    finality: std::collections::HashMap<String, ExplorerFinality>,
+    finality: std::collections::HashMap<String, TuppiraFinality>,
 }
 
 impl WalletFeedProjection {
@@ -714,34 +714,34 @@ impl WalletFeedProjection {
     }
 }
 
-fn finality_rank(finality: ExplorerFinality) -> u8 {
+fn finality_rank(finality: TuppiraFinality) -> u8 {
     match finality {
-        ExplorerFinality::Observed => 0,
-        ExplorerFinality::ReorgPossible => 1,
-        ExplorerFinality::Finalized => 2,
+        TuppiraFinality::Observed => 0,
+        TuppiraFinality::ReorgPossible => 1,
+        TuppiraFinality::Finalized => 2,
     }
 }
 
 /// An untrusted, versioned event projection produced only after validating raw
 /// chain data. It must never be treated as a canonical protocol event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExplorerEventDto {
+pub struct TuppiraEventDto {
     pub schema_version: u16,
     pub chain_id: ChainId,
     pub network: Network,
     pub contract: String,
-    pub event_type: ExplorerEventType,
+    pub event_type: TuppiraEventType,
     pub block_height: u64,
     pub block_hash: String,
     pub transaction_id: String,
     pub log_index: u64,
-    pub finality: ExplorerFinality,
-    pub payload: ExplorerEventPayload,
+    pub finality: TuppiraFinality,
+    pub payload: TuppiraEventPayload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExplorerEventType {
+pub enum TuppiraEventType {
     SanadCreated,
     SealConsumed,
     TransferSent,
@@ -752,7 +752,7 @@ pub enum ExplorerEventType {
 /// observation cannot be inferred from a source-chain send.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ExplorerEventPayload {
+pub enum TuppiraEventPayload {
     SanadCreated {
         sanad_id: String,
         commitment: String,
@@ -779,13 +779,13 @@ pub enum ExplorerEventPayload {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExplorerFinality {
+pub enum TuppiraFinality {
     Observed,
     ReorgPossible,
     Finalized,
 }
 
-impl ExplorerFinality {
+impl TuppiraFinality {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Observed => "observed",
@@ -795,10 +795,10 @@ impl ExplorerFinality {
     }
 }
 
-impl ExplorerEventDto {
+impl TuppiraEventDto {
     /// Rejects unknown schema versions and records whose identity is incomplete.
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != EXPLORER_EVENT_SCHEMA_VERSION {
+        if self.schema_version != TUPPIRA_EVENT_SCHEMA_VERSION {
             return Err("unsupported explorer event schema version".into());
         }
         if self.chain_id.as_str().is_empty()
@@ -809,13 +809,13 @@ impl ExplorerEventDto {
             return Err("event identity is incomplete".into());
         }
         match (&self.event_type, &self.payload) {
-            (ExplorerEventType::TransferSent, ExplorerEventPayload::TransferSent { .. })
+            (TuppiraEventType::TransferSent, TuppiraEventPayload::TransferSent { .. })
             | (
-                ExplorerEventType::TransferMaterialized,
-                ExplorerEventPayload::TransferMaterialized { .. },
+                TuppiraEventType::TransferMaterialized,
+                TuppiraEventPayload::TransferMaterialized { .. },
             )
-            | (ExplorerEventType::SanadCreated, ExplorerEventPayload::SanadCreated { .. })
-            | (ExplorerEventType::SealConsumed, ExplorerEventPayload::SealConsumed { .. }) => {
+            | (TuppiraEventType::SanadCreated, TuppiraEventPayload::SanadCreated { .. })
+            | (TuppiraEventType::SealConsumed, TuppiraEventPayload::SealConsumed { .. }) => {
                 Ok(())
             }
             _ => Err("event type and payload do not match".into()),
@@ -832,7 +832,7 @@ pub struct EventDecodeContext {
     pub network: Network,
     pub contract: String,
     pub topic: String,
-    pub event_type: ExplorerEventType,
+    pub event_type: TuppiraEventType,
 }
 
 /// Minimal wire evidence retained during decoding. The indexer must verify
@@ -886,9 +886,9 @@ fn is_hex_width(value: &str, bytes: usize) -> bool {
 #[cfg(test)]
 mod event_tests {
     use super::*;
-    fn event(kind: ExplorerEventType, payload: ExplorerEventPayload) -> ExplorerEventDto {
-        ExplorerEventDto {
-            schema_version: EXPLORER_EVENT_SCHEMA_VERSION,
+    fn event(kind: TuppiraEventType, payload: TuppiraEventPayload) -> TuppiraEventDto {
+        TuppiraEventDto {
+            schema_version: TUPPIRA_EVENT_SCHEMA_VERSION,
             chain_id: ChainId::new("ethereum"),
             network: Network::Mainnet,
             contract: "0x1234".into(),
@@ -897,7 +897,7 @@ mod event_tests {
             block_hash: "0x01".into(),
             transaction_id: "0x02".into(),
             log_index: 0,
-            finality: ExplorerFinality::Observed,
+            finality: TuppiraFinality::Observed,
             payload,
         }
     }
@@ -905,8 +905,8 @@ mod event_tests {
     fn validates_a_versioned_send_event() {
         assert!(
             event(
-                ExplorerEventType::TransferSent,
-                ExplorerEventPayload::TransferSent {
+                TuppiraEventType::TransferSent,
+                TuppiraEventPayload::TransferSent {
                     transfer_id: "t".into(),
                     sanad_id: "s".into(),
                     destination_chain: ChainId::new("solana"),
@@ -920,8 +920,8 @@ mod event_tests {
     #[test]
     fn rejects_unknown_versions() {
         let mut value = event(
-            ExplorerEventType::SealConsumed,
-            ExplorerEventPayload::SealConsumed {
+            TuppiraEventType::SealConsumed,
+            TuppiraEventPayload::SealConsumed {
                 sanad_id: "s".into(),
                 nullifier: "n".into(),
             },
@@ -933,8 +933,8 @@ mod event_tests {
     fn rejects_conflated_lifecycle() {
         assert!(
             event(
-                ExplorerEventType::TransferSent,
-                ExplorerEventPayload::TransferMaterialized {
+                TuppiraEventType::TransferSent,
+                TuppiraEventPayload::TransferMaterialized {
                     transfer_id: "t".into(),
                     source_chain: ChainId::new("ethereum"),
                     source_transaction_id: "x".into(),
@@ -948,8 +948,8 @@ mod event_tests {
     }
     fn feed(sequence: u64) -> WalletFeedEnvelope {
         let event = event(
-            ExplorerEventType::SealConsumed,
-            ExplorerEventPayload::SealConsumed {
+            TuppiraEventType::SealConsumed,
+            TuppiraEventPayload::SealConsumed {
                 sanad_id: "s".into(),
                 nullifier: "n".into(),
             },
@@ -974,9 +974,9 @@ mod event_tests {
                 lag_blocks: 0,
                 status: IndexerFreshnessStatus::Fresh,
             },
-            finality: ExplorerFinality::Observed,
+            finality: TuppiraFinality::Observed,
             provenance: FeedProvenance {
-                producer: "csv-explorer-indexer".into(),
+                producer: "tuppira-indexer".into(),
                 source_cursor: format!("cursor-{sequence}"),
                 cryptographically_verified: false,
             },
@@ -1002,15 +1002,15 @@ mod event_tests {
         missing_block.observed_block.hash.clear();
         assert!(missing_block.validate().is_err());
         let mut inconsistent_finality = feed(1);
-        inconsistent_finality.finality = ExplorerFinality::Finalized;
+        inconsistent_finality.finality = TuppiraFinality::Finalized;
         assert!(inconsistent_finality.validate().is_err());
     }
     #[test]
     fn permits_explicit_reorg_replacement_but_not_silent_finality_regression() {
         let mut projection = WalletFeedProjection::default();
         let mut finalized = feed(1);
-        finalized.finality = ExplorerFinality::Finalized;
-        finalized.event.finality = ExplorerFinality::Finalized;
+        finalized.finality = TuppiraFinality::Finalized;
+        finalized.event.finality = TuppiraFinality::Finalized;
         assert_eq!(projection.apply(finalized), Ok(true));
 
         let regressing = feed(2);
@@ -1055,7 +1055,7 @@ mod event_tests {
             network: Network::Mainnet,
             contract: format!("0x{}", "11".repeat(20)),
             topic: format!("0x{}", "22".repeat(32)),
-            event_type: ExplorerEventType::SealConsumed,
+            event_type: TuppiraEventType::SealConsumed,
         }
     }
     #[test]

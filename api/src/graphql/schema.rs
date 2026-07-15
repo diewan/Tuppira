@@ -1,4 +1,4 @@
-/// GraphQL schema for the CSV Explorer API.
+/// GraphQL schema for the Tuppira API.
 ///
 /// Provides queries for all indexed data types with filtering,
 /// pagination, and aggregate statistics.
@@ -7,8 +7,8 @@ use futures::{Stream, stream};
 use sqlx::SqlitePool;
 use std::str::FromStr;
 
-use csv_explorer_shared::{CommitmentScheme, InclusionProofType};
-use csv_explorer_storage::repositories::{
+use tuppira_shared::{CommitmentScheme, InclusionProofType};
+use tuppira_storage::repositories::{
     AdvancedProofRepository, ContractsRepository, SanadsRepository, SealsRepository,
     StatsRepository, TransfersRepository,
 };
@@ -79,14 +79,14 @@ impl Query {
         let limit = filter.limit.unwrap_or(20) as usize;
         let offset = filter.offset.unwrap_or(0) as usize;
 
-        let shared_filter = csv_explorer_shared::SanadFilter {
+        let shared_filter = tuppira_shared::SanadFilter {
             chain: filter.chain,
             owner: filter.owner,
             status: filter.status.as_deref().map(|s| match s {
-                "active" => csv_explorer_shared::SanadStatus::Active,
-                "spent" => csv_explorer_shared::SanadStatus::Spent,
-                "pending" => csv_explorer_shared::SanadStatus::Pending,
-                _ => csv_explorer_shared::SanadStatus::Active,
+                "active" => tuppira_shared::SanadStatus::Active,
+                "spent" => tuppira_shared::SanadStatus::Spent,
+                "pending" => tuppira_shared::SanadStatus::Pending,
+                _ => tuppira_shared::SanadStatus::Active,
             }),
             limit: Some(limit),
             offset: Some(offset),
@@ -150,19 +150,19 @@ impl Query {
         let limit = filter.limit.unwrap_or(20) as usize;
         let offset = filter.offset.unwrap_or(0) as usize;
 
-        let shared_filter = csv_explorer_shared::TransferFilter {
+        let shared_filter = tuppira_shared::TransferFilter {
             sanad_id: filter.sanad_id,
             from_chain: filter.from_chain,
             to_chain: filter.to_chain,
             status: filter.status.as_deref().map(|s| match s {
-                "pending" => csv_explorer_shared::TransferStatus::Initiated,
-                "in_progress" => csv_explorer_shared::TransferStatus::SubmittingProof,
-                "completed" => csv_explorer_shared::TransferStatus::Completed,
-                "failed" => csv_explorer_shared::TransferStatus::Failed {
+                "pending" => tuppira_shared::TransferStatus::Initiated,
+                "in_progress" => tuppira_shared::TransferStatus::SubmittingProof,
+                "completed" => tuppira_shared::TransferStatus::Completed,
+                "failed" => tuppira_shared::TransferStatus::Failed {
                     error_code: "UNKNOWN".to_string(),
                     retryable: true,
                 },
-                _ => csv_explorer_shared::TransferStatus::Initiated,
+                _ => tuppira_shared::TransferStatus::Initiated,
             }),
             limit: Some(limit),
             offset: Some(offset),
@@ -226,20 +226,20 @@ impl Query {
         let limit = filter.limit.unwrap_or(20) as usize;
         let offset = filter.offset.unwrap_or(0) as usize;
 
-        let shared_filter = csv_explorer_shared::SealFilter {
+        let shared_filter = tuppira_shared::SealFilter {
             chain: filter.chain,
             seal_type: filter.seal_type.as_deref().map(|s| match s {
-                "utxo" => csv_explorer_shared::SealType::Utxo,
-                "object" => csv_explorer_shared::SealType::Object,
-                "resource" => csv_explorer_shared::SealType::Resource,
-                "nullifier" => csv_explorer_shared::SealType::Nullifier,
-                "account" => csv_explorer_shared::SealType::Account,
-                _ => csv_explorer_shared::SealType::Utxo,
+                "utxo" => tuppira_shared::SealType::Utxo,
+                "object" => tuppira_shared::SealType::Object,
+                "resource" => tuppira_shared::SealType::Resource,
+                "nullifier" => tuppira_shared::SealType::Nullifier,
+                "account" => tuppira_shared::SealType::Account,
+                _ => tuppira_shared::SealType::Utxo,
             }),
             status: filter.status.as_deref().map(|s| match s {
-                "available" => csv_explorer_shared::SealStatus::Available,
-                "consumed" => csv_explorer_shared::SealStatus::Consumed,
-                _ => csv_explorer_shared::SealStatus::Available,
+                "available" => tuppira_shared::SealStatus::Available,
+                "consumed" => tuppira_shared::SealStatus::Consumed,
+                _ => tuppira_shared::SealStatus::Available,
             }),
             sanad_id: filter.sanad_id,
             limit: Some(limit),
@@ -324,20 +324,20 @@ impl Query {
         let limit = filter.limit.unwrap_or(20) as usize;
         let offset = filter.offset.unwrap_or(0) as usize;
 
-        let shared_filter = csv_explorer_shared::ContractFilter {
+        let shared_filter = tuppira_shared::ContractFilter {
             chain: filter.chain,
             contract_type: filter.contract_type.as_deref().map(|s| match s {
-                "nullifier_registry" => csv_explorer_shared::ContractType::NullifierRegistry,
-                "state_commitment" => csv_explorer_shared::ContractType::StateCommitment,
-                "sanad_registry" => csv_explorer_shared::ContractType::SanadRegistry,
-                "bridge" => csv_explorer_shared::ContractType::Bridge,
-                _ => csv_explorer_shared::ContractType::Other,
+                "nullifier_registry" => tuppira_shared::ContractType::NullifierRegistry,
+                "state_commitment" => tuppira_shared::ContractType::StateCommitment,
+                "sanad_registry" => tuppira_shared::ContractType::SanadRegistry,
+                "bridge" => tuppira_shared::ContractType::Bridge,
+                _ => tuppira_shared::ContractType::Other,
             }),
             status: filter.status.as_deref().map(|s| match s {
-                "active" => csv_explorer_shared::ContractStatus::Active,
-                "deprecated" => csv_explorer_shared::ContractStatus::Deprecated,
-                "error" => csv_explorer_shared::ContractStatus::Error,
-                _ => csv_explorer_shared::ContractStatus::Active,
+                "active" => tuppira_shared::ContractStatus::Active,
+                "deprecated" => tuppira_shared::ContractStatus::Deprecated,
+                "error" => tuppira_shared::ContractStatus::Error,
+                _ => tuppira_shared::ContractStatus::Active,
             }),
             limit: Some(limit),
             offset: Some(offset),
@@ -399,7 +399,7 @@ impl Query {
             .data::<GraphqlContext>()
             .map_err(|e| ServerError::new(format!("{:?}", e), None))?;
         let repo = SanadsRepository::new(gql_ctx.pool.clone());
-        let filter = csv_explorer_shared::SanadFilter {
+        let filter = tuppira_shared::SanadFilter {
             chain: None,
             owner: Some(owner),
             status: None,
@@ -461,7 +461,7 @@ impl Query {
             .map_err(|e| ServerError::new(format!("{:?}", e), None))?;
         let repo = AdvancedProofRepository::new(gql_ctx.pool.clone());
 
-        let filter = csv_explorer_shared::SanadProofFilter {
+        let filter = tuppira_shared::SanadProofFilter {
             chain: None,
             owner: None,
             commitment_scheme: scheme
@@ -494,7 +494,7 @@ impl Query {
             .map_err(|e| ServerError::new(format!("{:?}", e), None))?;
         let repo = AdvancedProofRepository::new(gql_ctx.pool.clone());
 
-        let filter = csv_explorer_shared::SealProofFilter {
+        let filter = tuppira_shared::SealProofFilter {
             chain: None,
             seal_type: None,
             seal_proof_type: None,

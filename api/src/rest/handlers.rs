@@ -1,4 +1,4 @@
-/// REST API handlers for the CSV Explorer.
+/// REST API handlers for the Tuppira.
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -6,11 +6,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use csv_explorer_storage::repositories::{
+use tuppira_storage::repositories::{
     SanadsRepository, SealsRepository, StatsRepository, TransfersRepository,
 };
 
-use csv_explorer_shared::{ExplorerError, SanadFilter, SealFilter, TransferFilter};
+use tuppira_shared::{TuppiraError, SanadFilter, SealFilter, TransferFilter};
 use std::str::FromStr;
 
 // ---------------------------------------------------------------------------
@@ -26,6 +26,8 @@ type AppState = (
     >,
     sqlx::SqlitePool,
     crate::feed::WalletFeedHub,
+    // Per-chain configured network, used to build official block-explorer links.
+    std::sync::Arc<std::collections::HashMap<String, tuppira_shared::Network>>,
 );
 
 // ---------------------------------------------------------------------------
@@ -73,8 +75,8 @@ pub struct WalletFeedQuery {
 /// projections. They never authorize wallet or runtime mutation.
 pub async fn wallet_feed(
     Query(query): Query<WalletFeedQuery>,
-    State((_, _, feed)): State<AppState>,
-) -> Json<ApiResponse<Vec<csv_explorer_shared::WalletFeedEnvelope>>> {
+    State((_, _, feed, _)): State<AppState>,
+) -> Json<ApiResponse<Vec<tuppira_shared::WalletFeedEnvelope>>> {
     Json(ApiResponse::from(
         feed.since(query.after_sequence.unwrap_or(0)).await,
     ))
@@ -97,9 +99,9 @@ pub struct ListSanadsQuery {
 /// GET /api/v1/sanads
 pub async fn list_sanads(
     Query(query): Query<ListSanadsQuery>,
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<PaginatedResponse<csv_explorer_shared::SanadRecord>>>,
+    Json<ApiResponse<PaginatedResponse<tuppira_shared::SanadRecord>>>,
     (StatusCode, Json<ErrorResponse>),
 > {
     let repo = SanadsRepository::new(pool);
@@ -111,18 +113,18 @@ pub async fn list_sanads(
         chain: query.chain,
         owner: query.owner,
         status: query.status.as_deref().map(|s| match s {
-            "active" => csv_explorer_shared::SanadStatus::Active,
-            "spent" => csv_explorer_shared::SanadStatus::Spent,
-            "pending" => csv_explorer_shared::SanadStatus::Pending,
-            _ => csv_explorer_shared::SanadStatus::Active,
+            "active" => tuppira_shared::SanadStatus::Active,
+            "spent" => tuppira_shared::SanadStatus::Spent,
+            "pending" => tuppira_shared::SanadStatus::Pending,
+            _ => tuppira_shared::SanadStatus::Active,
         }),
         limit: Some(limit),
         offset: Some(offset),
     };
 
-    let total = repo.count().await.map_err(explorer_error)?;
+    let total = repo.count().await.map_err(tuppira_error)?;
 
-    let data = repo.list(&filter).await.map_err(explorer_error)?;
+    let data = repo.list(&filter).await.map_err(tuppira_error)?;
 
     Ok(Json(ApiResponse::from(PaginatedResponse {
         data,
@@ -135,12 +137,12 @@ pub async fn list_sanads(
 /// GET /api/v1/sanads/:id
 pub async fn get_sanad(
     Path(id): Path<String>,
-    State((_, pool, _)): State<AppState>,
-) -> Result<Json<ApiResponse<csv_explorer_shared::SanadRecord>>, (StatusCode, Json<ErrorResponse>)>
+    State((_, pool, _, _)): State<AppState>,
+) -> Result<Json<ApiResponse<tuppira_shared::SanadRecord>>, (StatusCode, Json<ErrorResponse>)>
 {
     let repo = SanadsRepository::new(pool);
 
-    let sanad = repo.get_by_id(&id).await.map_err(explorer_error)?;
+    let sanad = repo.get_by_id(&id).await.map_err(tuppira_error)?;
 
     match sanad {
         Some(r) => Ok(Json(ApiResponse::from(r))),
@@ -166,9 +168,9 @@ pub struct ListTransfersQuery {
 /// GET /api/v1/transfers
 pub async fn list_transfers(
     Query(query): Query<ListTransfersQuery>,
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<PaginatedResponse<csv_explorer_shared::TransferRecord>>>,
+    Json<ApiResponse<PaginatedResponse<tuppira_shared::TransferRecord>>>,
     (StatusCode, Json<ErrorResponse>),
 > {
     let repo = TransfersRepository::new(pool);
@@ -181,22 +183,22 @@ pub async fn list_transfers(
         from_chain: query.from_chain,
         to_chain: query.to_chain,
         status: query.status.as_deref().map(|s| match s {
-            "pending" => csv_explorer_shared::TransferStatus::Initiated,
-            "in_progress" => csv_explorer_shared::TransferStatus::SubmittingProof,
-            "completed" => csv_explorer_shared::TransferStatus::Completed,
-            "failed" => csv_explorer_shared::TransferStatus::Failed {
+            "pending" => tuppira_shared::TransferStatus::Initiated,
+            "in_progress" => tuppira_shared::TransferStatus::SubmittingProof,
+            "completed" => tuppira_shared::TransferStatus::Completed,
+            "failed" => tuppira_shared::TransferStatus::Failed {
                 error_code: "UNKNOWN".to_string(),
                 retryable: true,
             },
-            _ => csv_explorer_shared::TransferStatus::Initiated,
+            _ => tuppira_shared::TransferStatus::Initiated,
         }),
         limit: Some(limit),
         offset: Some(offset),
     };
 
-    let total = repo.count(filter.clone()).await.map_err(explorer_error)?;
+    let total = repo.count(filter.clone()).await.map_err(tuppira_error)?;
 
-    let data = repo.list(filter).await.map_err(explorer_error)?;
+    let data = repo.list(filter).await.map_err(tuppira_error)?;
 
     Ok(Json(ApiResponse::from(PaginatedResponse {
         data,
@@ -209,38 +211,39 @@ pub async fn list_transfers(
 /// GET /api/v1/transfers/:id
 pub async fn get_transfer(
     Path(id): Path<String>,
-    State((_, pool, _)): State<AppState>,
-) -> Result<Json<ApiResponse<csv_explorer_shared::TransferRecord>>, (StatusCode, Json<ErrorResponse>)>
+    State((_, pool, _, networks)): State<AppState>,
+) -> Result<Json<ApiResponse<tuppira_shared::TransferRecord>>, (StatusCode, Json<ErrorResponse>)>
 {
     let repo = TransfersRepository::new(pool);
 
-    let mut transfer = repo.get(&id).await.map_err(explorer_error)?;
+    let mut transfer = repo.get(&id).await.map_err(tuppira_error)?;
 
     match transfer {
         Some(ref mut t) => {
-            // Populate block explorer URLs based on chain
-            t.lock_tx_explorer_url = Some(get_explorer_url(&t.from_chain, &t.lock_tx));
+            // Link out to each chain's official explorer, network-aware. `None`
+            // (unknown chain / local devnet) leaves the field absent rather than
+            // fabricating a URL.
+            let network_of = |chain: &str| {
+                networks
+                    .get(chain)
+                    .copied()
+                    .unwrap_or(tuppira_shared::Network::Mainnet)
+            };
+            t.lock_tx_explorer_url = tuppira_shared::block_explorer::tx_url(
+                &t.from_chain,
+                network_of(&t.from_chain),
+                &t.lock_tx,
+            );
             if let Some(ref mint_tx) = t.mint_tx {
-                t.mint_tx_explorer_url = Some(get_explorer_url(&t.to_chain, mint_tx));
+                t.mint_tx_explorer_url = tuppira_shared::block_explorer::tx_url(
+                    &t.to_chain,
+                    network_of(&t.to_chain),
+                    mint_tx,
+                );
             }
             Ok(Json(ApiResponse::from(t.clone())))
         }
         None => Err(not_found(&format!("Transfer {} not found", id))),
-    }
-}
-
-/// Get block explorer URL for a transaction on a specific chain.
-fn get_explorer_url(chain: &str, tx_hash: &str) -> String {
-    match chain.to_lowercase().as_str() {
-        "bitcoin" => format!("https://blockstream.info/testnet/tx/{}", tx_hash),
-        "ethereum" => format!("https://sepolia.etherscan.io/tx/{}", tx_hash),
-        "solana" => format!("https://explorer.solana.com/tx/{}?cluster=devnet", tx_hash),
-        "sui" => format!("https://suiscan.xyz/testnet/tx/{}", tx_hash),
-        "aptos" => format!(
-            "https://explorer.aptoslabs.com/txn/{}?network=testnet",
-            tx_hash
-        ),
-        _ => format!("https://explorer.example.com/tx/{}", tx_hash),
     }
 }
 
@@ -262,9 +265,9 @@ pub struct ListSealsQuery {
 /// GET /api/v1/seals
 pub async fn list_seals(
     Query(query): Query<ListSealsQuery>,
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<PaginatedResponse<csv_explorer_shared::SealRecord>>>,
+    Json<ApiResponse<PaginatedResponse<tuppira_shared::SealRecord>>>,
     (StatusCode, Json<ErrorResponse>),
 > {
     let repo = SealsRepository::new(pool);
@@ -275,26 +278,26 @@ pub async fn list_seals(
     let filter = SealFilter {
         chain: query.chain,
         seal_type: query.seal_type.as_deref().map(|s| match s {
-            "utxo" => csv_explorer_shared::SealType::Utxo,
-            "object" => csv_explorer_shared::SealType::Object,
-            "resource" => csv_explorer_shared::SealType::Resource,
-            "nullifier" => csv_explorer_shared::SealType::Nullifier,
-            "account" => csv_explorer_shared::SealType::Account,
-            _ => csv_explorer_shared::SealType::Utxo,
+            "utxo" => tuppira_shared::SealType::Utxo,
+            "object" => tuppira_shared::SealType::Object,
+            "resource" => tuppira_shared::SealType::Resource,
+            "nullifier" => tuppira_shared::SealType::Nullifier,
+            "account" => tuppira_shared::SealType::Account,
+            _ => tuppira_shared::SealType::Utxo,
         }),
         status: query.status.as_deref().map(|s| match s {
-            "available" => csv_explorer_shared::SealStatus::Available,
-            "consumed" => csv_explorer_shared::SealStatus::Consumed,
-            _ => csv_explorer_shared::SealStatus::Available,
+            "available" => tuppira_shared::SealStatus::Available,
+            "consumed" => tuppira_shared::SealStatus::Consumed,
+            _ => tuppira_shared::SealStatus::Available,
         }),
         sanad_id: query.sanad_id,
         limit: Some(limit),
         offset: Some(offset),
     };
 
-    let total = repo.count(filter.clone()).await.map_err(explorer_error)?;
+    let total = repo.count(filter.clone()).await.map_err(tuppira_error)?;
 
-    let data = repo.list(filter).await.map_err(explorer_error)?;
+    let data = repo.list(filter).await.map_err(tuppira_error)?;
 
     Ok(Json(ApiResponse::from(PaginatedResponse {
         data,
@@ -307,11 +310,11 @@ pub async fn list_seals(
 /// GET /api/v1/seals/:id
 pub async fn get_seal(
     Path(id): Path<String>,
-    State((_, pool, _)): State<AppState>,
-) -> Result<Json<ApiResponse<csv_explorer_shared::SealRecord>>, (StatusCode, Json<ErrorResponse>)> {
+    State((_, pool, _, _)): State<AppState>,
+) -> Result<Json<ApiResponse<tuppira_shared::SealRecord>>, (StatusCode, Json<ErrorResponse>)> {
     let repo = SealsRepository::new(pool);
 
-    let seal = repo.get(&id).await.map_err(explorer_error)?;
+    let seal = repo.get(&id).await.map_err(tuppira_error)?;
 
     match seal {
         Some(s) => Ok(Json(ApiResponse::from(s))),
@@ -325,12 +328,12 @@ pub async fn get_seal(
 
 /// GET /api/v1/stats
 pub async fn get_stats(
-    State((_, pool, _)): State<AppState>,
-) -> Result<Json<ApiResponse<csv_explorer_shared::ExplorerStats>>, (StatusCode, Json<ErrorResponse>)>
+    State((_, pool, _, _)): State<AppState>,
+) -> Result<Json<ApiResponse<tuppira_shared::TuppiraStats>>, (StatusCode, Json<ErrorResponse>)>
 {
     let repo = StatsRepository::new(pool);
 
-    let stats = repo.get_stats().await.map_err(explorer_error)?;
+    let stats = repo.get_stats().await.map_err(tuppira_error)?;
 
     Ok(Json(ApiResponse::from(stats)))
 }
@@ -342,7 +345,7 @@ pub async fn get_stats(
 /// GET /api/v1/chains
 pub async fn list_chains(
     _state: State<AppState>,
-) -> Result<Json<ApiResponse<Vec<csv_explorer_shared::ChainInfo>>>, (StatusCode, Json<ErrorResponse>)>
+) -> Result<Json<ApiResponse<Vec<tuppira_shared::ChainInfo>>>, (StatusCode, Json<ErrorResponse>)>
 {
     Err(service_unavailable(
         "chain status is unavailable: the explorer is not connected to an authoritative indexer status source",
@@ -365,10 +368,10 @@ pub struct RegisterWalletAddressRequest {
 
 /// POST /api/v1/wallet/addresses
 pub async fn register_wallet_address(
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
     Json(request): Json<RegisterWalletAddressRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
-    use csv_explorer_shared::{Network, PriorityLevel};
+    use tuppira_shared::{Network, PriorityLevel};
 
     let network = match request.network.to_lowercase().as_str() {
         "mainnet" => Network::Mainnet,
@@ -401,7 +404,7 @@ pub async fn register_wallet_address(
     };
 
     // Register the address in the priority repository
-    let priority_repo = csv_explorer_storage::repositories::PriorityAddressRepository::new(pool);
+    let priority_repo = tuppira_storage::repositories::PriorityAddressRepository::new(pool);
 
     priority_repo
         .register_address(
@@ -434,10 +437,10 @@ pub struct UnregisterWalletAddressRequest {
 
 /// DELETE /api/v1/wallet/addresses
 pub async fn unregister_wallet_address(
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
     Json(request): Json<UnregisterWalletAddressRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
-    use csv_explorer_shared::Network;
+    use tuppira_shared::Network;
 
     let network = match request.network.to_lowercase().as_str() {
         "mainnet" => Network::Mainnet,
@@ -454,7 +457,7 @@ pub async fn unregister_wallet_address(
         }
     };
 
-    let priority_repo = csv_explorer_storage::repositories::PriorityAddressRepository::new(pool);
+    let priority_repo = tuppira_storage::repositories::PriorityAddressRepository::new(pool);
 
     let removed = priority_repo
         .unregister_address(
@@ -480,12 +483,12 @@ pub async fn unregister_wallet_address(
 /// GET /api/v1/wallet/{wallet_id}/addresses
 pub async fn get_wallet_addresses(
     Path(wallet_id): Path<String>,
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<Vec<csv_explorer_shared::PriorityAddress>>>,
+    Json<ApiResponse<Vec<tuppira_shared::PriorityAddress>>>,
     (StatusCode, Json<ErrorResponse>),
 > {
-    let priority_repo = csv_explorer_storage::repositories::PriorityAddressRepository::new(pool);
+    let priority_repo = tuppira_storage::repositories::PriorityAddressRepository::new(pool);
 
     let addresses = priority_repo
         .get_addresses_by_wallet(&wallet_id)
@@ -498,9 +501,9 @@ pub async fn get_wallet_addresses(
 /// GET /api/v1/wallet/address/{address}/data
 pub async fn get_address_data(
     Path(address): Path<String>,
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
-    use csv_explorer_shared::{SanadFilter, SealFilter, TransferFilter};
+    use tuppira_shared::{SanadFilter, SealFilter, TransferFilter};
 
     // Get sanads for this address
     let sanads_repo = SanadsRepository::new(pool.clone());
@@ -514,7 +517,7 @@ pub async fn get_address_data(
     let sanads = sanads_repo
         .list(&sanads_filter)
         .await
-        .map_err(explorer_error)?;
+        .map_err(tuppira_error)?;
 
     // Get seals for this address
     let seals_repo = SealsRepository::new(pool.clone());
@@ -530,7 +533,7 @@ pub async fn get_address_data(
     let seals = seals_repo
         .list(seals_filter)
         .await
-        .map_err(explorer_error)?;
+        .map_err(tuppira_error)?;
 
     // Get transfers for this address
     let transfers_repo = TransfersRepository::new(pool.clone());
@@ -545,7 +548,7 @@ pub async fn get_address_data(
     let transfers = transfers_repo
         .list(transfers_filter)
         .await
-        .map_err(explorer_error)?;
+        .map_err(tuppira_error)?;
 
     // Filter transfers where this address is involved
     let filtered_transfers: Vec<_> = transfers
@@ -569,9 +572,9 @@ pub async fn get_address_data(
 /// GET /api/v1/wallet/address/{address}/sanads
 pub async fn get_address_sanads(
     Path(address): Path<String>,
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<Vec<csv_explorer_shared::SanadRecord>>>,
+    Json<ApiResponse<Vec<tuppira_shared::SanadRecord>>>,
     (StatusCode, Json<ErrorResponse>),
 > {
     let repo = SanadsRepository::new(pool);
@@ -584,7 +587,7 @@ pub async fn get_address_sanads(
         status: None,
     };
 
-    let sanads = repo.list(&filter).await.map_err(explorer_error)?;
+    let sanads = repo.list(&filter).await.map_err(tuppira_error)?;
 
     Ok(Json(ApiResponse::from(sanads)))
 }
@@ -592,9 +595,9 @@ pub async fn get_address_sanads(
 /// GET /api/v1/wallet/address/{address}/seals
 pub async fn get_address_seals(
     Path(_address): Path<String>,
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<Vec<csv_explorer_shared::SealRecord>>>,
+    Json<ApiResponse<Vec<tuppira_shared::SealRecord>>>,
     (StatusCode, Json<ErrorResponse>),
 > {
     let repo = SealsRepository::new(pool);
@@ -608,7 +611,7 @@ pub async fn get_address_seals(
         sanad_id: None,
     };
 
-    let seals = repo.list(filter).await.map_err(explorer_error)?;
+    let seals = repo.list(filter).await.map_err(tuppira_error)?;
 
     Ok(Json(ApiResponse::from(seals)))
 }
@@ -616,9 +619,9 @@ pub async fn get_address_seals(
 /// GET /api/v1/wallet/address/{address}/transfers
 pub async fn get_address_transfers(
     Path(address): Path<String>,
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<Vec<csv_explorer_shared::TransferRecord>>>,
+    Json<ApiResponse<Vec<tuppira_shared::TransferRecord>>>,
     (StatusCode, Json<ErrorResponse>),
 > {
     let repo = TransfersRepository::new(pool);
@@ -632,7 +635,7 @@ pub async fn get_address_transfers(
         status: None,
     };
 
-    let transfers = repo.list(filter).await.map_err(explorer_error)?;
+    let transfers = repo.list(filter).await.map_err(tuppira_error)?;
 
     // Filter transfers where this address is involved
     let filtered_transfers: Vec<_> = transfers
@@ -645,12 +648,12 @@ pub async fn get_address_transfers(
 
 /// GET /api/v1/wallet/priority/status
 pub async fn get_priority_indexing_status(
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<csv_explorer_shared::PriorityIndexingStatus>>,
+    Json<ApiResponse<tuppira_shared::PriorityIndexingStatus>>,
     (StatusCode, Json<ErrorResponse>),
 > {
-    let priority_repo = csv_explorer_storage::repositories::PriorityAddressRepository::new(pool);
+    let priority_repo = tuppira_storage::repositories::PriorityAddressRepository::new(pool);
 
     let status = priority_repo
         .get_priority_indexing_status()
@@ -668,7 +671,7 @@ pub async fn get_priority_indexing_status(
 pub async fn health_check() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
-        "service": "csv-explorer-api"
+        "service": "tuppira-api"
     }))
 }
 
@@ -676,7 +679,7 @@ pub async fn health_check() -> Json<serde_json::Value> {
 // Error helpers
 // ---------------------------------------------------------------------------
 
-fn server_error(e: &ExplorerError) -> (StatusCode, Json<ErrorResponse>) {
+fn server_error(e: &TuppiraError) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ErrorResponse {
@@ -707,10 +710,10 @@ fn service_unavailable(message: &str) -> (StatusCode, Json<ErrorResponse>) {
 }
 
 fn internal_error(e: sqlx::Error) -> (StatusCode, Json<ErrorResponse>) {
-    server_error(&ExplorerError::Internal(e.to_string()))
+    server_error(&TuppiraError::Internal(e.to_string()))
 }
 
-fn explorer_error(e: ExplorerError) -> (StatusCode, Json<ErrorResponse>) {
+fn tuppira_error(e: TuppiraError) -> (StatusCode, Json<ErrorResponse>) {
     server_error(&e)
 }
 
@@ -746,13 +749,13 @@ pub struct EnhancedSanadsQuery {
 /// GET /api/v1/sanads/enhanced
 pub async fn list_enhanced_sanads(
     Query(query): Query<EnhancedSanadsQuery>,
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<Vec<csv_explorer_shared::EnhancedSanadRecord>>>,
+    Json<ApiResponse<Vec<tuppira_shared::EnhancedSanadRecord>>>,
     (StatusCode, Json<ErrorResponse>),
 > {
-    use csv_explorer_shared::SanadProofFilter;
-    use csv_explorer_storage::repositories::AdvancedProofRepository;
+    use tuppira_shared::SanadProofFilter;
+    use tuppira_storage::repositories::AdvancedProofRepository;
 
     let repo = AdvancedProofRepository::new(pool);
 
@@ -762,11 +765,11 @@ pub async fn list_enhanced_sanads(
         commitment_scheme: query
             .commitment_scheme
             .as_deref()
-            .and_then(|s| csv_explorer_shared::CommitmentScheme::from_str(s).ok()),
+            .and_then(|s| tuppira_shared::CommitmentScheme::from_str(s).ok()),
         inclusion_proof_type: query
             .inclusion_proof_type
             .as_deref()
-            .and_then(|s| csv_explorer_shared::InclusionProofType::from_str(s).ok()),
+            .and_then(|s| tuppira_shared::InclusionProofType::from_str(s).ok()),
         finality_proof_type: None,
         limit: query.limit,
         offset: query.offset,
@@ -783,13 +786,13 @@ pub async fn list_enhanced_sanads(
 /// GET /api/v1/sanads/enhanced/:id
 pub async fn get_enhanced_sanad(
     Path(id): Path<String>,
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<csv_explorer_shared::EnhancedSanadRecord>>,
+    Json<ApiResponse<tuppira_shared::EnhancedSanadRecord>>,
     (StatusCode, Json<ErrorResponse>),
 > {
-    use csv_explorer_shared::SanadProofFilter;
-    use csv_explorer_storage::repositories::AdvancedProofRepository;
+    use tuppira_shared::SanadProofFilter;
+    use tuppira_storage::repositories::AdvancedProofRepository;
 
     let repo = AdvancedProofRepository::new(pool);
 
@@ -819,13 +822,13 @@ pub async fn get_enhanced_sanad(
 /// GET /api/v1/seals/enhanced
 pub async fn list_enhanced_seals(
     Query(query): Query<crate::rest::handlers::ListSealsQuery>,
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<Vec<csv_explorer_shared::EnhancedSealRecord>>>,
+    Json<ApiResponse<Vec<tuppira_shared::EnhancedSealRecord>>>,
     (StatusCode, Json<ErrorResponse>),
 > {
-    use csv_explorer_shared::SealProofFilter;
-    use csv_explorer_storage::repositories::AdvancedProofRepository;
+    use tuppira_shared::SealProofFilter;
+    use tuppira_storage::repositories::AdvancedProofRepository;
 
     let repo = AdvancedProofRepository::new(pool);
 
@@ -849,13 +852,13 @@ pub async fn list_enhanced_seals(
 /// GET /api/v1/seals/enhanced/:id
 pub async fn get_enhanced_seal(
     Path(id): Path<String>,
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<csv_explorer_shared::EnhancedSealRecord>>,
+    Json<ApiResponse<tuppira_shared::EnhancedSealRecord>>,
     (StatusCode, Json<ErrorResponse>),
 > {
-    use csv_explorer_shared::SealProofFilter;
-    use csv_explorer_storage::repositories::AdvancedProofRepository;
+    use tuppira_shared::SealProofFilter;
+    use tuppira_storage::repositories::AdvancedProofRepository;
 
     let repo = AdvancedProofRepository::new(pool);
 
@@ -883,12 +886,12 @@ pub async fn get_enhanced_seal(
 
 /// GET /api/v1/proofs/statistics
 pub async fn get_proof_statistics(
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<csv_explorer_shared::ProofStatistics>>,
+    Json<ApiResponse<tuppira_shared::ProofStatistics>>,
     (StatusCode, Json<ErrorResponse>),
 > {
-    use csv_explorer_storage::repositories::AdvancedProofRepository;
+    use tuppira_storage::repositories::AdvancedProofRepository;
 
     let repo = AdvancedProofRepository::new(pool);
 
@@ -900,13 +903,13 @@ pub async fn get_proof_statistics(
 /// GET /api/v1/sanads/by-scheme/:scheme
 pub async fn get_sanads_by_scheme(
     Path(scheme): Path<String>,
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<Vec<csv_explorer_shared::EnhancedSanadRecord>>>,
+    Json<ApiResponse<Vec<tuppira_shared::EnhancedSanadRecord>>>,
     (StatusCode, Json<ErrorResponse>),
 > {
-    use csv_explorer_shared::{CommitmentScheme, SanadProofFilter};
-    use csv_explorer_storage::repositories::AdvancedProofRepository;
+    use tuppira_shared::{CommitmentScheme, SanadProofFilter};
+    use tuppira_storage::repositories::AdvancedProofRepository;
 
     let commitment_scheme = CommitmentScheme::from_str(&scheme)
         .map_err(|_| not_found(&format!("Unknown commitment scheme: {}", scheme)))?;
@@ -934,13 +937,13 @@ pub async fn get_sanads_by_scheme(
 /// GET /api/v1/sanads/by-proof/:proof_type
 pub async fn get_sanads_by_proof_type(
     Path(proof_type): Path<String>,
-    State((_, pool, _)): State<AppState>,
+    State((_, pool, _, _)): State<AppState>,
 ) -> Result<
-    Json<ApiResponse<Vec<csv_explorer_shared::EnhancedSanadRecord>>>,
+    Json<ApiResponse<Vec<tuppira_shared::EnhancedSanadRecord>>>,
     (StatusCode, Json<ErrorResponse>),
 > {
-    use csv_explorer_shared::{InclusionProofType, SanadProofFilter};
-    use csv_explorer_storage::repositories::AdvancedProofRepository;
+    use tuppira_shared::{InclusionProofType, SanadProofFilter};
+    use tuppira_storage::repositories::AdvancedProofRepository;
 
     let inclusion_proof_type = InclusionProofType::from_str(&proof_type)
         .map_err(|_| not_found(&format!("Unknown inclusion proof type: {}", proof_type)))?;

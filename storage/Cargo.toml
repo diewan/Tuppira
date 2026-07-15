@@ -1,5 +1,5 @@
 [package]
-name = "csv-explorer-storage"
+name = "tuppira-storage"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,7 +11,7 @@ path = "src/lib.rs"
 workspace = true
 
 [dependencies]
-csv-explorer-shared = { path = "../shared" }
+tuppira-shared = { path = "../shared" }
 sqlx.workspace = true
 tokio.workspace = true
 chrono.workspace = true

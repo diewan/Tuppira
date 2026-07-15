@@ -1,4 +1,4 @@
-/// Binary entry point for the CSV Explorer indexer.
+/// Binary entry point for the Tuppira indexer.
 ///
 /// Subcommands:
 ///   start       - Start the indexer daemon
@@ -7,14 +7,14 @@
 ///   reindex     - Reindex from a specific block
 ///   reset       - Reset sync progress
 use clap::{Parser, Subcommand};
-use csv_explorer_indexer::Indexer;
-use csv_explorer_shared::{ExplorerConfig, Result};
-use csv_explorer_storage::init_pool;
+use tuppira_indexer::Indexer;
+use tuppira_shared::{TuppiraConfig, Result};
+use tuppira_storage::init_pool;
 
-/// CSV Explorer Indexer - Multi-chain indexing daemon
+/// Tuppira Indexer - Multi-chain indexing daemon
 #[derive(Parser)]
-#[command(name = "csv-explorer-indexer")]
-#[command(about = "Multi-chain indexing daemon for CSV Explorer", long_about = None)]
+#[command(name = "tuppira-indexer")]
+#[command(about = "Multi-chain indexing daemon for Tuppira", long_about = None)]
 struct Cli {
     /// Path to configuration file
     #[arg(short, long)]
@@ -67,9 +67,9 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let config = if let Some(ref path) = cli.config {
-        ExplorerConfig::from_file(std::path::Path::new(path))?
+        TuppiraConfig::from_file(std::path::Path::new(path))?
     } else {
-        ExplorerConfig::load()?
+        TuppiraConfig::load()?
     };
 
     // Initialize database

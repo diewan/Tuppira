@@ -7,7 +7,7 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 use tokio::sync::{RwLock, broadcast};
 
-use csv_explorer_shared::{WalletFeedEnvelope, WalletFeedProjection};
+use tuppira_shared::{WalletFeedEnvelope, WalletFeedProjection};
 
 #[derive(Clone)]
 pub struct WalletFeedHub {
@@ -94,9 +94,9 @@ impl Default for WalletFeedHub {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use csv_explorer_shared::{
-        ChainId, EXPLORER_EVENT_SCHEMA_VERSION, ExplorerEventDto, ExplorerEventPayload,
-        ExplorerEventType, ExplorerFinality, FeedProvenance, IndexerFreshness,
+    use tuppira_shared::{
+        ChainId, TUPPIRA_EVENT_SCHEMA_VERSION, TuppiraEventDto, TuppiraEventPayload,
+        TuppiraEventType, TuppiraFinality, FeedProvenance, IndexerFreshness,
         IndexerFreshnessStatus, Network, ObservedBlock, PROTOCOL_VERSION,
         WALLET_FEED_SCHEMA_VERSION, WalletFeedEnvelope,
     };
@@ -104,18 +104,18 @@ mod tests {
     use super::WalletFeedHub;
 
     fn observation(sequence: u64) -> WalletFeedEnvelope {
-        let event = ExplorerEventDto {
-            schema_version: EXPLORER_EVENT_SCHEMA_VERSION,
+        let event = TuppiraEventDto {
+            schema_version: TUPPIRA_EVENT_SCHEMA_VERSION,
             chain_id: ChainId::new("ethereum"),
             network: Network::Testnet,
             contract: "0xcontract".into(),
-            event_type: ExplorerEventType::SealConsumed,
+            event_type: TuppiraEventType::SealConsumed,
             block_height: 9,
             block_hash: "0xblock".into(),
             transaction_id: "0xtx".into(),
             log_index: 1,
-            finality: ExplorerFinality::Observed,
-            payload: ExplorerEventPayload::SealConsumed {
+            finality: TuppiraFinality::Observed,
+            payload: TuppiraEventPayload::SealConsumed {
                 sanad_id: "sanad".into(),
                 nullifier: "nullifier".into(),
             },
@@ -140,9 +140,9 @@ mod tests {
                 lag_blocks: 0,
                 status: IndexerFreshnessStatus::Fresh,
             },
-            finality: ExplorerFinality::Observed,
+            finality: TuppiraFinality::Observed,
             provenance: FeedProvenance {
-                producer: "csv-explorer-indexer".into(),
+                producer: "tuppira-indexer".into(),
                 source_cursor: format!("cursor-{sequence}"),
                 cryptographically_verified: false,
             },
@@ -186,7 +186,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_feed_rebuilds_after_restart() {
-        let pool = csv_explorer_storage::init_pool("sqlite::memory:", 1).await;
+        let pool = tuppira_storage::init_pool("sqlite::memory:", 1).await;
         assert!(pool.is_ok());
         let pool = match pool {
             Ok(pool) => pool,

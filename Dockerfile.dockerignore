@@ -4,10 +4,10 @@
 !csv-protocol/
 !csv-protocol/**
 !csv-apps/
-!csv-apps/csv-explorer/
-!csv-apps/csv-explorer/**
+!csv-apps/tuppira/
+!csv-apps/tuppira/**
 
 csv-protocol/**/target/
-csv-apps/csv-explorer/**/target/
-csv-apps/csv-explorer/data/
-csv-apps/csv-explorer/.git/
+csv-apps/tuppira/**/target/
+csv-apps/tuppira/data/
+csv-apps/tuppira/.git/

@@ -2,15 +2,15 @@ services:
   indexer:
     build:
       # The sibling protocol workspace is a declared dependency of the
-      # explorer crates, so the build context is the deliberate monorepo root.
+      # tuppira crates, so the build context is the deliberate monorepo root.
       context: ../..
-      dockerfile: csv-apps/csv-explorer/Dockerfile
+      dockerfile: csv-apps/tuppira/Dockerfile
       target: indexer
-    command: ["csv-explorer-indexer", "start"]
+    command: ["tuppira-indexer", "start"]
     volumes:
       - ./data:/data
     environment:
-      - DATABASE_URL=sqlite:///data/explorer.db
+      - DATABASE_URL=sqlite:///data/tuppira.db
       - CONFIG_PATH=/app/config.toml
     depends_on:
       - api
@@ -24,15 +24,15 @@ services:
   api:
     build:
       context: ../..
-      dockerfile: csv-apps/csv-explorer/Dockerfile
+      dockerfile: csv-apps/tuppira/Dockerfile
       target: api
-    command: ["csv-explorer-api", "start"]
+    command: ["tuppira-api", "start"]
     ports:
       - "8080:8080"
     volumes:
       - ./data:/data
     environment:
-      - DATABASE_URL=sqlite:///data/explorer.db
+      - DATABASE_URL=sqlite:///data/tuppira.db
       - CONFIG_PATH=/app/config.toml
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]

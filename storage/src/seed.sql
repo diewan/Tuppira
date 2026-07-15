@@ -1,4 +1,4 @@
--- Seed data for CSV Explorer testing
+-- Seed data for Tuppira testing
 -- This script populates the database with sample data for testing
 
 -- Insert sample sanads

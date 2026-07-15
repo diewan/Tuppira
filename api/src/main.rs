@@ -1,17 +1,17 @@
-/// Binary entry point for the CSV Explorer API server.
+/// Binary entry point for the Tuppira API server.
 ///
 /// Subcommands:
 ///   start       - Start the API server
 ///   graphql     - Open GraphQL playground URL
 ///   health      - Check API health
 use clap::{Parser, Subcommand};
-use csv_explorer_api::ApiServer;
-use csv_explorer_shared::{ExplorerConfig, Result};
+use tuppira_api::ApiServer;
+use tuppira_shared::{TuppiraConfig, Result};
 
-/// CSV Explorer API - GraphQL and REST API server
+/// Tuppira API - GraphQL and REST API server
 #[derive(Parser)]
-#[command(name = "csv-explorer-api")]
-#[command(about = "GraphQL and REST API server for CSV Explorer", long_about = None)]
+#[command(name = "tuppira-api")]
+#[command(about = "GraphQL and REST API server for Tuppira", long_about = None)]
 struct Cli {
     /// Path to configuration file
     #[arg(short, long)]
@@ -45,9 +45,9 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let config = if let Some(ref path) = cli.config {
-        ExplorerConfig::from_file(std::path::Path::new(path))?
+        TuppiraConfig::from_file(std::path::Path::new(path))?
     } else {
-        ExplorerConfig::load()?
+        TuppiraConfig::load()?
     };
 
     match cli.command {
@@ -60,18 +60,18 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_start(config: ExplorerConfig) -> Result<()> {
+async fn run_start(config: TuppiraConfig) -> Result<()> {
     tracing::info!("Starting API server");
     let server = ApiServer::new(config).await?;
     server.start().await
 }
 
-fn run_graphql_url(config: &ExplorerConfig) {
+fn run_graphql_url(config: &TuppiraConfig) {
     let url = format!("http://{}:{}/playground", config.api.host, config.api.port);
     println!("GraphQL Playground: {}", url);
 }
 
-async fn run_health(config: &ExplorerConfig) -> Result<()> {
+async fn run_health(config: &TuppiraConfig) -> Result<()> {
     let client = reqwest::Client::new();
     let url = format!("http://{}/health", config.api.bind());
 
@@ -82,7 +82,7 @@ async fn run_health(config: &ExplorerConfig) -> Result<()> {
                 Ok(())
             } else {
                 println!("API server returned status: {}", resp.status());
-                Err(csv_explorer_shared::ExplorerError::Internal(format!(
+                Err(tuppira_shared::TuppiraError::Internal(format!(
                     "Health check failed with status: {}",
                     resp.status()
                 )))
@@ -90,7 +90,7 @@ async fn run_health(config: &ExplorerConfig) -> Result<()> {
         }
         Err(e) => {
             println!("API server is not reachable: {}", e);
-            Err(csv_explorer_shared::ExplorerError::Internal(format!(
+            Err(tuppira_shared::TuppiraError::Internal(format!(
                 "Failed to connect to API server: {}",
                 e
             )))

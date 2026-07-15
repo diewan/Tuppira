@@ -1,4 +1,4 @@
-/// Advanced commitment and proof types for the CSV Explorer.
+/// Advanced commitment and proof types for the Tuppira.
 ///
 /// This module provides extended types for indexing and querying
 /// commitments and proofs with metadata about scheme types, proof types, etc.
@@ -47,16 +47,16 @@ pub enum FinalityProofType {
     Custom,
 }
 
-macro_rules! explorer_metadata_enum {
+macro_rules! tuppira_metadata_enum {
     ($type:ident { $($name:ident => $value:literal),+ $(,)? }) => {
         impl $type { pub const fn as_str(self) -> &'static str { match self { $(Self::$name => $value),+ } } }
         impl std::fmt::Display for $type { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) } }
         impl FromStr for $type { type Err = (); fn from_str(value: &str) -> Result<Self, Self::Err> { match value { $($value => Ok(Self::$name)),+, _ => Err(()) } } }
     };
 }
-explorer_metadata_enum!(CommitmentScheme { HashBased => "hash_based", Pedersen => "pedersen", KZG => "kzg", Bulletproofs => "bulletproofs", Multilinear => "multilinear", FRI => "fri", Custom => "custom" });
-explorer_metadata_enum!(InclusionProofType { Merkle => "merkle", MerklePatricia => "merkle_patricia", ObjectProof => "object_proof", Accumulator => "accumulator", AccountState => "account_state", Custom => "custom" });
-explorer_metadata_enum!(FinalityProofType { ConfirmationDepth => "confirmation_depth", Checkpoint => "checkpoint", FinalizedBlock => "finalized_block", SlotBased => "slot_based", Custom => "custom" });
+tuppira_metadata_enum!(CommitmentScheme { HashBased => "hash_based", Pedersen => "pedersen", KZG => "kzg", Bulletproofs => "bulletproofs", Multilinear => "multilinear", FRI => "fri", Custom => "custom" });
+tuppira_metadata_enum!(InclusionProofType { Merkle => "merkle", MerklePatricia => "merkle_patricia", ObjectProof => "object_proof", Accumulator => "accumulator", AccountState => "account_state", Custom => "custom" });
+tuppira_metadata_enum!(FinalityProofType { ConfirmationDepth => "confirmation_depth", Checkpoint => "checkpoint", FinalizedBlock => "finalized_block", SlotBased => "slot_based", Custom => "custom" });
 
 // ---------------------------------------------------------------------------
 // Enhanced Record Types for Indexer/API

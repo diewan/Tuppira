@@ -4,7 +4,7 @@
 //! chain may be enabled only after its signed deployment manifest entry has
 //! been checked against the operator's selected network.
 
-use csv_explorer_shared::{ChainConfig, ExplorerError, Network};
+use tuppira_shared::{ChainConfig, TuppiraError, Network};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -35,12 +35,12 @@ struct Contract {
 pub fn validate_enabled_chains(
     path: &Path,
     chains: &HashMap<String, ChainConfig>,
-) -> Result<(), ExplorerError> {
+) -> Result<(), TuppiraError> {
     if !chains.values().any(|chain| chain.enabled) {
         return Ok(());
     }
 
-    let source = std::fs::read_to_string(path).map_err(ExplorerError::Io)?;
+    let source = std::fs::read_to_string(path).map_err(TuppiraError::Io)?;
     let manifest: DeploymentManifest = serde_json::from_str(&source)?;
     if manifest
         .signature
@@ -48,17 +48,17 @@ pub fn validate_enabled_chains(
         .filter(|signature| !signature.is_empty())
         .is_none()
     {
-        return Err(ExplorerError::Parse(
+        return Err(TuppiraError::Parse(
             "deployment manifest is unsigned; enabled indexing is refused".to_string(),
         ));
     }
 
     for (chain_id, chain) in chains.iter().filter(|(_, chain)| chain.enabled) {
         let deployment = manifest.deployments.get(chain_id).ok_or_else(|| {
-            ExplorerError::Parse(format!("missing deployment manifest entry for {chain_id}"))
+            TuppiraError::Parse(format!("missing deployment manifest entry for {chain_id}"))
         })?;
         if deployment.network != network_name(chain.network) {
-            return Err(ExplorerError::Parse(format!(
+            return Err(TuppiraError::Parse(format!(
                 "deployment manifest network mismatch for {chain_id}"
             )));
         }
@@ -75,7 +75,7 @@ fn network_name(network: Network) -> &'static str {
     }
 }
 
-fn validate_identifier(chain_id: &str, deployment: &Deployment) -> Result<(), ExplorerError> {
+fn validate_identifier(chain_id: &str, deployment: &Deployment) -> Result<(), TuppiraError> {
     let valid = match chain_id {
         "ethereum" => deployment
             .contracts
@@ -99,7 +99,7 @@ fn validate_identifier(chain_id: &str, deployment: &Deployment) -> Result<(), Ex
         _ => false,
     };
     valid.then_some(()).ok_or_else(|| {
-        ExplorerError::Parse(format!(
+        TuppiraError::Parse(format!(
             "missing canonical deployment identifier for {chain_id}"
         ))
     })
@@ -108,7 +108,7 @@ fn validate_identifier(chain_id: &str, deployment: &Deployment) -> Result<(), Ex
 #[cfg(test)]
 mod tests {
     use super::validate_enabled_chains;
-    use csv_explorer_shared::{ChainConfig, Network};
+    use tuppira_shared::{ChainConfig, Network};
     use std::collections::HashMap;
     use std::fs;
 
@@ -130,12 +130,13 @@ mod tests {
                 rpc_url: "http://localhost".to_string(),
                 start_block: None,
                 poll_interval_ms: None,
+                ..ChainConfig::default()
             },
         );
         let result = validate_enabled_chains(&path, &chains);
         let _ = fs::remove_file(path);
         assert!(
-            matches!(result, Err(csv_explorer_shared::ExplorerError::Parse(message)) if message.contains("unsigned"))
+            matches!(result, Err(tuppira_shared::TuppiraError::Parse(message)) if message.contains("unsigned"))
         );
     }
 }

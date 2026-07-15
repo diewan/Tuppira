@@ -2,7 +2,7 @@
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 
-use csv_explorer_shared::{Result, SanadFilter, SanadRecord, SanadStatus};
+use tuppira_shared::{Result, SanadFilter, SanadRecord, SanadStatus};
 
 /// Typed repository for the `sanads` table.
 #[derive(Clone)]

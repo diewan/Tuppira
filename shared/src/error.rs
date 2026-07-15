@@ -1,9 +1,9 @@
-/// Error types for the CSV Explorer.
+/// Error types for the Tuppira.
 use thiserror::Error;
 
 /// Top-level error type for the explorer.
 #[derive(Error, Debug)]
-pub enum ExplorerError {
+pub enum TuppiraError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -64,26 +64,26 @@ pub enum ExplorerError {
     Internal(String),
 }
 
-impl ExplorerError {
+impl TuppiraError {
     pub fn error_code(&self) -> &'static str {
         match self {
-            ExplorerError::Io(_) => "EXP_IO_ERROR",
-            ExplorerError::Toml(_) => "EXP_TOML_ERROR",
-            ExplorerError::Json(_) => "EXP_JSON_ERROR",
-            ExplorerError::Database(_) => "EXP_DATABASE_ERROR",
-            ExplorerError::Migration(_) => "EXP_MIGRATION_ERROR",
-            ExplorerError::NotFound { .. } => "EXP_ENTITY_NOT_FOUND",
-            ExplorerError::Http(_) => "EXP_HTTP_ERROR",
-            ExplorerError::RpcError { .. } => "EXP_RPC_ERROR",
-            ExplorerError::RpcParseError { .. } => "EXP_RPC_PARSE_ERROR",
-            ExplorerError::IndexerStopped => "EXP_INDEXER_STOPPED",
-            ExplorerError::BlockError { .. } => "EXP_BLOCK_ERROR",
-            ExplorerError::ChainReorg { .. } => "EXP_CHAIN_REORG",
-            ExplorerError::GraphQL(_) => "EXP_GRAPHQL_ERROR",
-            ExplorerError::HttpServer(_) => "EXP_HTTP_SERVER_ERROR",
-            ExplorerError::Hex(_) => "EXP_HEX_DECODE_ERROR",
-            ExplorerError::Parse(_) => "EXP_PARSE_ERROR",
-            ExplorerError::Internal(_) => "EXP_INTERNAL_ERROR",
+            TuppiraError::Io(_) => "EXP_IO_ERROR",
+            TuppiraError::Toml(_) => "EXP_TOML_ERROR",
+            TuppiraError::Json(_) => "EXP_JSON_ERROR",
+            TuppiraError::Database(_) => "EXP_DATABASE_ERROR",
+            TuppiraError::Migration(_) => "EXP_MIGRATION_ERROR",
+            TuppiraError::NotFound { .. } => "EXP_ENTITY_NOT_FOUND",
+            TuppiraError::Http(_) => "EXP_HTTP_ERROR",
+            TuppiraError::RpcError { .. } => "EXP_RPC_ERROR",
+            TuppiraError::RpcParseError { .. } => "EXP_RPC_PARSE_ERROR",
+            TuppiraError::IndexerStopped => "EXP_INDEXER_STOPPED",
+            TuppiraError::BlockError { .. } => "EXP_BLOCK_ERROR",
+            TuppiraError::ChainReorg { .. } => "EXP_CHAIN_REORG",
+            TuppiraError::GraphQL(_) => "EXP_GRAPHQL_ERROR",
+            TuppiraError::HttpServer(_) => "EXP_HTTP_SERVER_ERROR",
+            TuppiraError::Hex(_) => "EXP_HEX_DECODE_ERROR",
+            TuppiraError::Parse(_) => "EXP_PARSE_ERROR",
+            TuppiraError::Internal(_) => "EXP_INTERNAL_ERROR",
         }
     }
 
@@ -93,46 +93,46 @@ impl ExplorerError {
 
     pub fn suggested_fix(&self) -> String {
         match self {
-            ExplorerError::Io(_) => {
+            TuppiraError::Io(_) => {
                 "I/O operation failed. Check file permissions and disk space.".to_string()
             }
-            ExplorerError::Toml(_) => {
+            TuppiraError::Toml(_) => {
                 "TOML configuration parsing failed. Check syntax in config files.".to_string()
             }
-            ExplorerError::Json(_) => {
+            TuppiraError::Json(_) => {
                 "JSON parsing failed. Check API responses are valid JSON.".to_string()
             }
-            ExplorerError::Database(_) => {
+            TuppiraError::Database(_) => {
                 "Database operation failed. Check connection and schema.".to_string()
             }
-            ExplorerError::Migration(_) => {
+            TuppiraError::Migration(_) => {
                 "Database migration failed. Check migration files and database state.".to_string()
             }
-            ExplorerError::NotFound { entity_type, id } => {
+            TuppiraError::NotFound { entity_type, id } => {
                 format!("{} '{}' not found in database.", entity_type, id)
             }
-            ExplorerError::Http(_) => {
+            TuppiraError::Http(_) => {
                 "HTTP request failed. Check network and API endpoints.".to_string()
             }
-            ExplorerError::RpcError { chain, .. } => {
+            TuppiraError::RpcError { chain, .. } => {
                 format!("RPC error on chain {}. Check node status and retry.", chain)
             }
-            ExplorerError::RpcParseError { chain, .. } => {
+            TuppiraError::RpcParseError { chain, .. } => {
                 format!(
                     "RPC parse error on {}. Response format may have changed.",
                     chain
                 )
             }
-            ExplorerError::IndexerStopped => {
+            TuppiraError::IndexerStopped => {
                 "Indexer has stopped. Check logs and restart.".to_string()
             }
-            ExplorerError::BlockError { chain, block, .. } => {
+            TuppiraError::BlockError { chain, block, .. } => {
                 format!(
                     "Error processing block {} on {}. Check block validity.",
                     block, chain
                 )
             }
-            ExplorerError::ChainReorg {
+            TuppiraError::ChainReorg {
                 chain,
                 block,
                 depth,
@@ -143,19 +143,19 @@ impl ExplorerError {
                     chain, block, depth
                 )
             }
-            ExplorerError::GraphQL(_) => {
+            TuppiraError::GraphQL(_) => {
                 "GraphQL operation failed. Check query syntax and schema.".to_string()
             }
-            ExplorerError::HttpServer(_) => {
+            TuppiraError::HttpServer(_) => {
                 "HTTP server error. Check server configuration and ports.".to_string()
             }
-            ExplorerError::Hex(_) => {
+            TuppiraError::Hex(_) => {
                 "Hex decoding failed. Check input is valid hexadecimal.".to_string()
             }
-            ExplorerError::Parse(_) => {
+            TuppiraError::Parse(_) => {
                 "Parse error. Check input format matches expected type.".to_string()
             }
-            ExplorerError::Internal(_) => {
+            TuppiraError::Internal(_) => {
                 "Internal error. Check logs for details and report if persistent.".to_string()
             }
         }
@@ -166,4 +166,4 @@ impl ExplorerError {
     }
 }
 
-pub type Result<T> = std::result::Result<T, ExplorerError>;
+pub type Result<T> = std::result::Result<T, TuppiraError>;

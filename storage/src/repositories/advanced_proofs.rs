@@ -2,7 +2,7 @@
 ///
 /// Handles storage and querying of commitment schemes, proof types,
 /// and enhanced sanad/seal records with metadata.
-use csv_explorer_shared::{
+use tuppira_shared::{
     CommitmentScheme, EnhancedInclusionProof, EnhancedSanadRecord, EnhancedSealRecord,
     EnhancedTransferRecord, FinalityProofCount, FinalityProofType, InclusionProofCount,
     InclusionProofType, ProofStatistics, ProofVerificationStatus, SanadProofFilter, SchemeCount,

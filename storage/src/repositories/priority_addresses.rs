@@ -2,7 +2,7 @@
 ///
 /// Handles registration and tracking of wallet addresses for priority indexing.
 use chrono::{DateTime, Utc};
-use csv_explorer_shared::{
+use tuppira_shared::{
     IndexingActivity, Network, PriorityAddress, PriorityIndexingStatus, PriorityLevel,
 };
 use sqlx::{Row, SqlitePool};

@@ -16,9 +16,9 @@ use std::sync::Arc;
 
 use super::chain_indexer::{AddressIndexingResult, ChainIndexer, ChainResult};
 use super::rpc_manager::RpcManager;
-use csv_explorer_shared::{
+use tuppira_shared::{
     ChainConfig, CommitmentScheme, CsvContract, EnhancedSanadRecord, EnhancedSealRecord,
-    EnhancedTransferRecord, ExplorerError, FinalityProofType, InclusionProofType, Network,
+    EnhancedTransferRecord, TuppiraError, FinalityProofType, InclusionProofType, Network,
     PriorityLevel, SanadRecord, SealRecord, SealStatus, SealType, TransferRecord,
 };
 
@@ -84,11 +84,11 @@ impl ChainIndexer for BitcoinIndexer {
         Ok(())
     }
 
-    async fn index_explorer_events(
+    async fn index_tuppira_events(
         &self,
         block: u64,
-    ) -> ChainResult<Vec<csv_explorer_shared::ExplorerEventDto>> {
-        Err(ExplorerError::BlockError {
+    ) -> ChainResult<Vec<tuppira_shared::TuppiraEventDto>> {
+        Err(TuppiraError::BlockError {
             chain: self.chain_id().to_string(),
             block,
             message: "canonical Bitcoin event decoder is not configured".to_string(),
@@ -545,7 +545,7 @@ impl BitcoinIndexer {
             owner,
             created_at: chrono::Utc::now(),
             created_tx: tx.txid.clone(),
-            status: csv_explorer_shared::SanadStatus::Active,
+            status: tuppira_shared::SanadStatus::Active,
             metadata: Some(serde_json::json!({
                 "protocol_id": protocol_str,
                 "commitment_scheme": "hash_based",
@@ -619,11 +619,15 @@ impl BitcoinIndexer {
             lock_tx: tx.txid.clone(),
             mint_tx: None,
             proof_ref: None,
-            status: csv_explorer_shared::types::TransferStatus::Initiated,
+            status: tuppira_shared::types::TransferStatus::Initiated,
             created_at: chrono::Utc::now(),
             completed_at: None,
             duration_ms: None,
-            lock_tx_explorer_url: None,
+            lock_tx_explorer_url: tuppira_shared::block_explorer::tx_url(
+                "bitcoin",
+                self.config.network,
+                &tx.txid,
+            ),
             mint_tx_explorer_url: None,
         })
     }

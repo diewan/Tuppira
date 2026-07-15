@@ -2,7 +2,7 @@
 use chrono::Utc;
 use sqlx::SqlitePool;
 
-use csv_explorer_shared::Result;
+use tuppira_shared::Result;
 
 /// Repository for managing chain sync progress.
 #[derive(Clone)]

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::chain_indexer::ChainIndexer;
 use crate::rpc_manager::RpcManager;
-use csv_explorer_shared::ChainConfig;
+use tuppira_shared::ChainConfig;
 
 /// Factory function type for creating chain indexers
 type IndexerFactoryFn = Arc<dyn Fn(ChainConfig, RpcManager) -> Box<dyn ChainIndexer> + Send + Sync>;
@@ -37,8 +37,8 @@ impl IndexerPluginRegistry {
     ///
     /// # Example
     /// ```rust
-    /// use csv_explorer_indexer::indexer_plugin::IndexerPluginRegistry;
-    /// use csv_explorer_indexer::bitcoin::BitcoinIndexer;
+    /// use tuppira_indexer::indexer_plugin::IndexerPluginRegistry;
+    /// use tuppira_indexer::bitcoin::BitcoinIndexer;
     ///
     /// let mut registry = IndexerPluginRegistry::new();
     /// registry.register("bitcoin", |config, rpc_manager| {
@@ -304,7 +304,7 @@ mod tests {
     use super::*;
     use crate::chain_indexer::{AddressIndexingResult, ChainResult};
     use async_trait::async_trait;
-    use csv_explorer_shared::{
+    use tuppira_shared::{
         CommitmentScheme, CsvContract, EnhancedSanadRecord, EnhancedSealRecord,
         EnhancedTransferRecord, FinalityProofType, InclusionProofType, Network, PriorityLevel,
         SanadRecord, SealRecord, TransferRecord,

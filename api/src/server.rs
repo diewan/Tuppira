@@ -17,26 +17,38 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use csv_explorer_storage::init_pool;
+use tuppira_storage::init_pool;
 
 use crate::feed::WalletFeedHub;
 use crate::graphql::{create_schema, schema::GraphqlContext};
 use crate::rest;
-use csv_explorer_shared::{ApiConfig, ExplorerConfig, Result};
+use tuppira_shared::{ApiConfig, Network, TuppiraConfig, Result};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// The API server.
 pub struct ApiServer {
     config: ApiConfig,
     pool: SqlitePool,
+    /// Per-chain configured network, used to build official block-explorer links.
+    networks: Arc<HashMap<String, Network>>,
 }
 
 impl ApiServer {
     /// Create a new API server.
-    pub async fn new(config: ExplorerConfig) -> Result<Self> {
+    pub async fn new(config: TuppiraConfig) -> Result<Self> {
         let pool = init_pool(&config.database.url, config.database.max_connections).await?;
+        let networks = Arc::new(
+            config
+                .chains
+                .iter()
+                .map(|(chain, cfg)| (chain.clone(), cfg.network))
+                .collect(),
+        );
         Ok(Self {
             config: config.api,
             pool,
+            networks,
         })
     }
 
@@ -45,7 +57,7 @@ impl ApiServer {
         let pool = self.pool.clone();
         let feed = WalletFeedHub::from_pool(pool.clone())
             .await
-            .map_err(csv_explorer_shared::ExplorerError::Internal)?;
+            .map_err(tuppira_shared::TuppiraError::Internal)?;
         let schema = create_schema(
             GraphqlContext {
                 pool: pool.clone(),
@@ -72,13 +84,13 @@ impl ApiServer {
             .layer(DefaultBodyLimit::max(1_048_576))
             .layer(TraceLayer::new_for_http())
             .layer(ServiceBuilder::new())
-            .with_state((schema, pool, feed));
+            .with_state((schema, pool, feed, self.networks.clone()));
         if self.config.enable_graphql_playground {
             app = app.route("/playground", get(graphql_playground));
         }
 
         let addr: std::net::SocketAddr = self.config.bind().parse().map_err(|e| {
-            csv_explorer_shared::ExplorerError::Internal(format!(
+            tuppira_shared::TuppiraError::Internal(format!(
                 "Invalid address {}: {}",
                 self.config.bind(),
                 e
@@ -90,7 +102,7 @@ impl ApiServer {
             .serve(app.into_make_service())
             .await
             .map_err(|e| {
-                csv_explorer_shared::ExplorerError::Internal(format!("Server error: {}", e))
+                tuppira_shared::TuppiraError::Internal(format!("Server error: {}", e))
             })?;
 
         Ok(())
@@ -101,12 +113,12 @@ fn cors_layer(origins: &[String]) -> Result<CorsLayer> {
     let mut allowed = Vec::with_capacity(origins.len());
     for origin in origins {
         if origin == "*" {
-            return Err(csv_explorer_shared::ExplorerError::Parse(
+            return Err(tuppira_shared::TuppiraError::Parse(
                 "api.cors_origins must list explicit origins; '*' is forbidden".to_string(),
             ));
         }
         let value = HeaderValue::from_str(origin).map_err(|error| {
-            csv_explorer_shared::ExplorerError::Parse(format!(
+            tuppira_shared::TuppiraError::Parse(format!(
                 "invalid api.cors_origins entry {origin:?}: {error}"
             ))
         })?;
@@ -130,7 +142,7 @@ async fn graphql_playground() -> impl IntoResponse {
 
 /// GraphQL request handler.
 async fn graphql_handler(
-    State((schema, _, _)): State<(
+    State((schema, _, _, _)): State<(
         async_graphql::Schema<
             crate::graphql::schema::Query,
             crate::graphql::schema::Mutation,
@@ -138,6 +150,7 @@ async fn graphql_handler(
         >,
         SqlitePool,
         WalletFeedHub,
+        Arc<HashMap<String, Network>>,
     )>,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
@@ -149,12 +162,12 @@ async fn graphql_handler(
 
 /// Serve Prometheus metrics.
 async fn metrics_handler() -> impl IntoResponse {
-    csv_explorer_indexer::metrics::encode_metrics()
+    tuppira_indexer::metrics::encode_metrics()
 }
 
 /// Health check handler.
 async fn health_handler(
-    State((_, pool, _)): State<(
+    State((_, pool, _, _)): State<(
         async_graphql::Schema<
             crate::graphql::schema::Query,
             crate::graphql::schema::Mutation,
@@ -162,6 +175,7 @@ async fn health_handler(
         >,
         SqlitePool,
         WalletFeedHub,
+        Arc<HashMap<String, Network>>,
     )>,
 ) -> impl IntoResponse {
     if sqlx::query_scalar::<_, i64>("SELECT 1")
@@ -171,12 +185,12 @@ async fn health_handler(
     {
         (
             StatusCode::OK,
-            axum::Json(serde_json::json!({"status": "ok", "service": "csv-explorer-api"})),
+            axum::Json(serde_json::json!({"status": "ok", "service": "tuppira-api"})),
         )
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(serde_json::json!({"status": "unavailable", "service": "csv-explorer-api"})),
+            axum::Json(serde_json::json!({"status": "unavailable", "service": "tuppira-api"})),
         )
     }
 }

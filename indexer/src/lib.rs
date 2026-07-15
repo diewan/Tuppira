@@ -1,4 +1,4 @@
-/// Multi-chain indexer daemon for the CSV Explorer.
+/// Multi-chain indexer daemon for the Tuppira.
 ///
 /// Coordinates chain-specific indexers, manages sync progress,
 /// and exposes metrics for monitoring.
@@ -21,12 +21,12 @@ pub use rpc_manager::{AuthType, RpcConfig, RpcEndpoint, RpcManager, RpcType, loa
 pub use sync::SyncCoordinator;
 pub use wallet_bridge::{WalletIndexerBridge, WalletIndexerBridgeConfig};
 
-use csv_explorer_shared::{ExplorerConfig, Result};
+use tuppira_shared::{TuppiraConfig, Result};
 use sqlx::SqlitePool;
 
 /// The main indexer that wraps all chain indexers.
 pub struct Indexer {
-    config: ExplorerConfig,
+    config: TuppiraConfig,
     coordinator: SyncCoordinator,
     wallet_bridge: Option<WalletIndexerBridge>,
     rpc_manager: RpcManager,
@@ -36,10 +36,10 @@ pub struct Indexer {
 impl Indexer {
     /// Create a new indexer with the given configuration and database pool.
     /// Uses the plug-and-play indexer registry for dynamic chain support.
-    pub async fn new(config: ExplorerConfig, pool: SqlitePool) -> Result<Self> {
+    pub async fn new(config: TuppiraConfig, pool: SqlitePool) -> Result<Self> {
         if config.chains.values().any(|chain| chain.enabled) {
             let manifest_path = std::env::var("DEPLOYMENT_MANIFEST_PATH").map_err(|_| {
-                csv_explorer_shared::ExplorerError::Parse(
+                tuppira_shared::TuppiraError::Parse(
                     "DEPLOYMENT_MANIFEST_PATH is required when any chain is enabled".to_string(),
                 )
             })?;
@@ -83,7 +83,7 @@ impl Indexer {
     /// Create a new indexer with a custom plugin registry.
     /// This enables custom chain support beyond the built-in chains.
     pub async fn with_registry(
-        config: ExplorerConfig,
+        config: TuppiraConfig,
         pool: SqlitePool,
         plugin_registry: IndexerPluginRegistry,
     ) -> Result<Self> {
@@ -192,7 +192,7 @@ impl Indexer {
     }
 
     /// Get the current indexer status.
-    pub async fn status(&self) -> csv_explorer_shared::IndexerStatus {
+    pub async fn status(&self) -> tuppira_shared::IndexerStatus {
         self.coordinator.status().await
     }
 
@@ -224,7 +224,7 @@ impl Indexer {
 /// Consider using IndexerPluginRegistry directly for new code.
 pub fn build_boxed_indexer(
     chain_id: &str,
-    config: csv_explorer_shared::ChainConfig,
+    config: tuppira_shared::ChainConfig,
     rpc_manager: RpcManager,
 ) -> Option<Box<dyn ChainIndexer>> {
     let registry = IndexerPluginRegistryBuilder::new().build();
@@ -236,7 +236,7 @@ pub fn build_boxed_indexer(
 /// Consider using IndexerPluginRegistry directly for new code.
 pub fn build_arc_indexer(
     chain_id: &str,
-    config: csv_explorer_shared::ChainConfig,
+    config: tuppira_shared::ChainConfig,
     rpc_manager: RpcManager,
 ) -> Option<std::sync::Arc<dyn ChainIndexer>> {
     let registry = IndexerPluginRegistryBuilder::new().build();

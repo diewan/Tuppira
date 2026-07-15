@@ -2,7 +2,7 @@
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 
-use csv_explorer_shared::{ContractFilter, ContractStatus, ContractType, CsvContract, Result};
+use tuppira_shared::{ContractFilter, ContractStatus, ContractType, CsvContract, Result};
 
 /// Typed repository for the `contracts` table.
 #[derive(Clone)]

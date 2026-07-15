@@ -2,7 +2,7 @@
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 
-use csv_explorer_shared::{Result, TransferFilter, TransferRecord, TransferStatus};
+use tuppira_shared::{Result, TransferFilter, TransferRecord, TransferStatus};
 
 /// Typed repository for the `transfers` table.
 #[derive(Clone)]

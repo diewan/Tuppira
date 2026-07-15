@@ -1,4 +1,4 @@
-/// REST API routes for the CSV Explorer.
+/// REST API routes for the Tuppira.
 use axum::{Router, routing::get};
 
 use super::handlers;
@@ -11,6 +11,8 @@ type AppState = (
     >,
     sqlx::SqlitePool,
     crate::feed::WalletFeedHub,
+    // Per-chain configured network, used to build official block-explorer links.
+    std::sync::Arc<std::collections::HashMap<String, tuppira_shared::Network>>,
 );
 
 /// Build the REST API router.

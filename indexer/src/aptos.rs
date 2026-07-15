@@ -12,9 +12,9 @@ use serde::Deserialize;
 
 use super::chain_indexer::{AddressIndexingResult, ChainIndexer, ChainResult};
 use super::rpc_manager::RpcManager;
-use csv_explorer_shared::{
+use tuppira_shared::{
     ChainConfig, CommitmentScheme, ContractStatus, ContractType, CsvContract, EnhancedSanadRecord,
-    EnhancedSealRecord, EnhancedTransferRecord, ExplorerError, FinalityProofType,
+    EnhancedSealRecord, EnhancedTransferRecord, TuppiraError, FinalityProofType,
     InclusionProofType, SanadRecord, SealRecord, SealStatus, SealType, TransferRecord,
 };
 
@@ -74,11 +74,11 @@ impl ChainIndexer for AptosIndexer {
         Ok(())
     }
 
-    async fn index_explorer_events(
+    async fn index_tuppira_events(
         &self,
         block: u64,
-    ) -> ChainResult<Vec<csv_explorer_shared::ExplorerEventDto>> {
-        Err(ExplorerError::BlockError {
+    ) -> ChainResult<Vec<tuppira_shared::TuppiraEventDto>> {
+        Err(TuppiraError::BlockError {
             chain: self.chain_id().to_string(),
             block,
             message: "canonical Aptos event decoder is not configured".to_string(),
@@ -225,8 +225,8 @@ impl ChainIndexer for AptosIndexer {
     async fn index_addresses_with_priority(
         &self,
         addresses: &[String],
-        _priority: csv_explorer_shared::PriorityLevel,
-        _network: csv_explorer_shared::Network,
+        _priority: tuppira_shared::PriorityLevel,
+        _network: tuppira_shared::Network,
     ) -> ChainResult<AddressIndexingResult> {
         let mut result = AddressIndexingResult {
             addresses_processed: 0,
@@ -447,7 +447,7 @@ impl AptosIndexer {
             owner,
             created_at: chrono::Utc::now(),
             created_tx: tx_hash.to_string(),
-            status: csv_explorer_shared::SanadStatus::Active,
+            status: tuppira_shared::SanadStatus::Active,
             metadata: Some(event.data.clone()),
             transfer_count: 0,
             last_transfer_at: None,
@@ -503,11 +503,15 @@ impl AptosIndexer {
             lock_tx: tx_hash.to_string(),
             mint_tx: None,
             proof_ref: None,
-            status: csv_explorer_shared::TransferStatus::Initiated,
+            status: tuppira_shared::TransferStatus::Initiated,
             created_at: chrono::Utc::now(),
             completed_at: None,
             duration_ms: None,
-            lock_tx_explorer_url: None,
+            lock_tx_explorer_url: tuppira_shared::block_explorer::tx_url(
+                "aptos",
+                self.config.network,
+                tx_hash,
+            ),
             mint_tx_explorer_url: None,
         })
     }

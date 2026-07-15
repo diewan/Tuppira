@@ -1,7 +1,7 @@
 /// Repository for aggregate statistics queries.
 use sqlx::SqlitePool;
 
-use csv_explorer_shared::{ChainCount, ChainPairCount, ExplorerStats, Result};
+use tuppira_shared::{ChainCount, ChainPairCount, TuppiraStats, Result};
 
 /// Repository for aggregate statistics.
 #[derive(Clone)]
@@ -16,7 +16,7 @@ impl StatsRepository {
     }
 
     /// Get full aggregate statistics.
-    pub async fn get_stats(&self) -> Result<ExplorerStats> {
+    pub async fn get_stats(&self) -> Result<TuppiraStats> {
         let total_sanads: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sanads")
             .fetch_one(&self.pool)
             .await?;
@@ -103,7 +103,7 @@ impl StatsRepository {
         .fetch_one(&self.pool)
         .await?;
 
-        Ok(ExplorerStats {
+        Ok(TuppiraStats {
             total_sanads: total_sanads as u64,
             total_transfers: total_transfers as u64,
             total_seals: total_seals as u64,
