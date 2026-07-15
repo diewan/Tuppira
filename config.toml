@@ -19,26 +19,91 @@ poll_interval_ms = 5000
 [chains.bitcoin]
 enabled = false
 network = "mainnet"
-rpc_url = "https://mempool.space/api"
 start_block = 800000
+
+[chains.bitcoin.rpc_policy]
+chain = "bitcoin"
+network = "mainnet"
+selection = "built_in_only"
+
+[[chains.bitcoin.rpc_policy.endpoints]]
+id = "bitcoin-mainnet-mempool-space"
+url = "https://mempool.space/api"
+transport = "rest"
+capabilities = ["read", "broadcast", "address_index", "verify"]
+source = "built_in"
+provider = "mempool-space"
+priority = 0
 
 [chains.ethereum]
 enabled = false
 network = "mainnet"
-rpc_url = "https://eth.llamarpc.com"
 start_block = 19000000
+
+[chains.ethereum.rpc_policy]
+chain = "ethereum"
+network = "mainnet"
+selection = "built_in_only"
+
+[[chains.ethereum.rpc_policy.endpoints]]
+id = "ethereum-mainnet-llama-rpc"
+url = "https://eth.llamarpc.com"
+transport = "json_rpc_http"
+capabilities = ["read", "broadcast", "verify"]
+source = "built_in"
+provider = "llama-rpc"
+priority = 0
 
 [chains.sui]
 enabled = false
 network = "mainnet"
-rpc_url = "https://fullnode.mainnet.sui.io:443"
+
+[chains.sui.rpc_policy]
+chain = "sui"
+network = "mainnet"
+selection = "built_in_only"
+
+[[chains.sui.rpc_policy.endpoints]]
+id = "sui-mainnet-fullnode"
+url = "https://fullnode.mainnet.sui.io:443"
+transport = "json_rpc_http"
+capabilities = ["read", "broadcast", "verify"]
+source = "built_in"
+provider = "mysten-labs"
+priority = 0
 
 [chains.aptos]
 enabled = false
 network = "mainnet"
-rpc_url = "https://fullnode.mainnet.aptoslabs.com/v1"
+
+[chains.aptos.rpc_policy]
+chain = "aptos"
+network = "mainnet"
+selection = "built_in_only"
+
+[[chains.aptos.rpc_policy.endpoints]]
+id = "aptos-mainnet-fullnode"
+url = "https://fullnode.mainnet.aptoslabs.com/v1"
+transport = "rest"
+capabilities = ["read", "broadcast", "verify"]
+source = "built_in"
+provider = "aptos-labs"
+priority = 0
 
 [chains.solana]
 enabled = false
 network = "mainnet"
-rpc_url = "https://api.mainnet-beta.solana.com"
+
+[chains.solana.rpc_policy]
+chain = "solana"
+network = "mainnet-beta"
+selection = "built_in_only"
+
+[[chains.solana.rpc_policy.endpoints]]
+id = "solana-mainnet-foundation"
+url = "https://api.mainnet-beta.solana.com"
+transport = "json_rpc_http"
+capabilities = ["read", "broadcast", "verify"]
+source = "built_in"
+provider = "solana-foundation"
+priority = 0

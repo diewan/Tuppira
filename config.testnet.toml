@@ -19,29 +19,94 @@ poll_interval_ms = 5000
 [chains.bitcoin]
 enabled = false
 network = "testnet"
-rpc_url = "https://mempool.space/testnet/api"
 start_block = 299500
+
+[chains.bitcoin.rpc_policy]
+chain = "bitcoin"
+network = "testnet"
+selection = "built_in_only"
+
+[[chains.bitcoin.rpc_policy.endpoints]]
+id = "bitcoin-testnet-mempool-space"
+url = "https://mempool.space/testnet/api"
+transport = "rest"
+capabilities = ["read", "broadcast", "address_index", "verify"]
+source = "built_in"
+provider = "mempool-space"
+priority = 0
 
 [chains.ethereum]
 enabled = false
 network = "testnet"
-rpc_url = "https://ethereum-sepolia-rpc.publicnode.com"
 start_block = 10632000
+
+[chains.ethereum.rpc_policy]
+chain = "ethereum"
+network = "sepolia"
+selection = "built_in_only"
+
+[[chains.ethereum.rpc_policy.endpoints]]
+id = "ethereum-sepolia-publicnode"
+url = "https://ethereum-sepolia-rpc.publicnode.com"
+transport = "json_rpc_http"
+capabilities = ["read", "broadcast", "verify"]
+source = "built_in"
+provider = "publicnode"
+priority = 0
 
 [chains.sui]
 enabled = false
 network = "testnet"
-rpc_url = "https://fullnode.testnet.sui.io:443"
 start_block = 324267000
+
+[chains.sui.rpc_policy]
+chain = "sui"
+network = "testnet"
+selection = "built_in_only"
+
+[[chains.sui.rpc_policy.endpoints]]
+id = "sui-testnet-fullnode"
+url = "https://fullnode.testnet.sui.io:443"
+transport = "json_rpc_http"
+capabilities = ["read", "broadcast", "verify"]
+source = "built_in"
+provider = "mysten-labs"
+priority = 0
 
 [chains.aptos]
 enabled = false
 network = "testnet"
-rpc_url = "https://fullnode.testnet.aptoslabs.com/v1"
 start_block = 8374406000
+
+[chains.aptos.rpc_policy]
+chain = "aptos"
+network = "testnet"
+selection = "built_in_only"
+
+[[chains.aptos.rpc_policy.endpoints]]
+id = "aptos-testnet-fullnode"
+url = "https://fullnode.testnet.aptoslabs.com/v1"
+transport = "rest"
+capabilities = ["read", "broadcast", "verify"]
+source = "built_in"
+provider = "aptos-labs"
+priority = 0
 
 [chains.solana]
 enabled = false
 network = "devnet"
-rpc_url = "https://api.devnet.solana.com"
 start_block = 250000000
+
+[chains.solana.rpc_policy]
+chain = "solana"
+network = "devnet"
+selection = "built_in_only"
+
+[[chains.solana.rpc_policy.endpoints]]
+id = "solana-devnet-foundation"
+url = "https://api.devnet.solana.com"
+transport = "json_rpc_http"
+capabilities = ["read", "broadcast", "verify"]
+source = "built_in"
+provider = "solana-foundation"
+priority = 0

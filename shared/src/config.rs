@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::types::Network;
+use csv_sdk::rpc_policy::{ChainRpcPolicy, RpcCapability};
 
 /// Top-level explorer configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,7 +112,12 @@ pub struct ChainConfig {
     pub enabled: bool,
     /// Network type (mainnet, testnet, devnet).
     pub network: Network,
-    /// RPC endpoint URL.
+    /// Canonical endpoint and trust policy for this chain.
+    pub rpc_policy: ChainRpcPolicy,
+    /// Transitional projection used by current indexers until RPC-002 moves
+    /// every adapter to capability-based endpoint resolution. This is never
+    /// read from or written to profile TOML.
+    #[serde(skip)]
     pub rpc_url: String,
     /// Starting block for initial sync (if not set, starts from genesis).
     pub start_block: Option<u64>,
@@ -174,7 +180,10 @@ impl ExplorerConfig {
         let content = std::fs::read_to_string(path).map_err(crate::ExplorerError::Io)?;
         let config: ExplorerConfig =
             toml::from_str(&content).map_err(|e| crate::ExplorerError::Toml(e.to_string()))?;
-        config.with_discovered_chains().with_database_url_from_env()
+        config
+            .with_resolved_rpc_urls()?
+            .with_discovered_chains()
+            .with_database_url_from_env()
     }
 
     /// Load configuration from the default locations.
@@ -223,6 +232,37 @@ impl ExplorerConfig {
             chains: HashMap::new(),
         }
         .with_discovered_chains())
+    }
+
+    /// Validate each profile policy and derive the legacy request URL from its
+    /// explicit read-capable endpoint. No URL fallback or transport guessing is
+    /// allowed during this migration.
+    fn with_resolved_rpc_urls(mut self) -> Result<Self, crate::ExplorerError> {
+        for (chain, config) in &mut self.chains {
+            config
+                .rpc_policy
+                .validate()
+                .map_err(|error| crate::ExplorerError::Parse(error.to_string()))?;
+            if config.rpc_policy.chain != *chain {
+                return Err(crate::ExplorerError::Parse(format!(
+                    "chain profile key {chain} does not match policy chain {}",
+                    config.rpc_policy.chain
+                )));
+            }
+            let endpoint = config
+                .rpc_policy
+                .candidates(RpcCapability::Read)
+                .map_err(|error| crate::ExplorerError::Parse(error.to_string()))?
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    crate::ExplorerError::Parse(format!(
+                        "chain {chain} policy has no read-capable endpoint"
+                    ))
+                })?;
+            config.rpc_url = endpoint.url.clone();
+        }
+        Ok(self)
     }
 
     /// Merge in chain defaults discovered from the shared `chains/` configuration directory.
@@ -309,6 +349,12 @@ impl Default for ChainConfig {
         ChainConfig {
             enabled: default_chain_enabled(),
             network: Network::Mainnet,
+            rpc_policy: ChainRpcPolicy {
+                chain: String::new(),
+                network: String::new(),
+                selection: Default::default(),
+                endpoints: Vec::new(),
+            },
             rpc_url: String::new(),
             start_block: None,
             poll_interval_ms: None,
@@ -319,6 +365,14 @@ impl Default for ChainConfig {
 #[cfg(test)]
 mod tests {
     use super::ExplorerConfig;
+    use std::path::Path;
+
+    fn explorer_root() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("shared crate lives under csv-explorer")
+            .to_path_buf()
+    }
 
     #[test]
     fn database_url_override_replaces_file_or_default_configuration() {
@@ -337,5 +391,40 @@ mod tests {
         assert!(
             matches!(result, Err(crate::ExplorerError::Parse(message)) if message == "DATABASE_URL must not be empty")
         );
+    }
+
+    #[test]
+    fn every_shipped_explorer_profile_uses_a_valid_canonical_rpc_policy() {
+        for profile in [
+            "config.toml",
+            "config.mainnet.toml",
+            "config.testnet.toml",
+            "config.example.toml",
+        ] {
+            let path = explorer_root().join(profile);
+            let contents = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{profile} must be readable: {error}"));
+            assert!(
+                !contents.contains("rpc_url") && !contents.contains("${"),
+                "{profile} must not contain scalar or shell-expanded RPC configuration"
+            );
+            let config: ExplorerConfig = toml::from_str(&contents)
+                .unwrap_or_else(|error| panic!("{profile} must deserialize: {error}"));
+            let config = config
+                .with_resolved_rpc_urls()
+                .unwrap_or_else(|error| panic!("{profile} policy must validate: {error}"));
+            assert_eq!(
+                config.chains.len(),
+                5,
+                "{profile} must configure five chains"
+            );
+            assert!(
+                config
+                    .chains
+                    .values()
+                    .all(|chain| !chain.rpc_url.is_empty()),
+                "{profile} must derive every legacy request bridge from policy"
+            );
+        }
     }
 }
