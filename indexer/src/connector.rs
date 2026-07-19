@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use std::collections::HashSet;
 
 use tuppira_shared::{
-    ObservationRecord, ProviderSignatureRecord, RawPayloadDescriptor, ReorgRecord,
-    SupersessionRecord, TenantVisibility, TuppiraError,
+    DeploymentAttestationObservationProfile, ObservationRecord, ProviderSignatureRecord,
+    RawPayloadDescriptor, ReorgRecord, SupersessionRecord, TenantVisibility, TuppiraError,
 };
 
 /// Maximum number of events returned by one bounded discovery call.
@@ -161,6 +161,8 @@ pub enum SourceAuthentication {
 pub struct ObservationCandidate {
     pub observation: ObservationRecord,
     pub raw_payload: Option<RawPayloadDescriptor>,
+    /// Present only for the typed deployment/attestation normalization profile.
+    pub deployment_profile: Option<DeploymentAttestationObservationProfile>,
 }
 
 /// Non-authoritative reconciliation findings; storage decides append-only lineage.
@@ -242,6 +244,16 @@ pub async fn authenticate_and_normalize(
         }
     };
     let candidate = connector.normalize(raw_event, profile_version)?;
+    if let Some(profile) = &candidate.deployment_profile {
+        profile.validate().map_err(|error| {
+            ConnectorError::Operation(format!("invalid deployment profile: {error:?}"))
+        })?;
+        if candidate.observation.normalized_profile_id
+            != tuppira_shared::DEPLOYMENT_ATTESTATION_PROFILE_ID
+        {
+            return Err(ConnectorError::InvalidField("normalized profile linkage"));
+        }
+    }
     candidate
         .observation
         .validate()
@@ -368,6 +380,7 @@ mod tests {
                     },
                 },
                 raw_payload: None,
+                deployment_profile: None,
             })
         }
 

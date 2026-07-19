@@ -815,9 +815,7 @@ impl TuppiraEventDto {
                 TuppiraEventPayload::TransferMaterialized { .. },
             )
             | (TuppiraEventType::SanadCreated, TuppiraEventPayload::SanadCreated { .. })
-            | (TuppiraEventType::SealConsumed, TuppiraEventPayload::SealConsumed { .. }) => {
-                Ok(())
-            }
+            | (TuppiraEventType::SealConsumed, TuppiraEventPayload::SealConsumed { .. }) => Ok(()),
             _ => Err("event type and payload do not match".into()),
         }
     }

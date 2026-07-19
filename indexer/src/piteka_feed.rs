@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tuppira_shared::{
-    OBSERVATION_SCHEMA_VERSION, ObservationRecord, ProviderSignatureRecord, RawPayloadDescriptor,
-    RetractionStatus, TenantVisibility,
+    ArtifactAttestationObservation, DEPLOYMENT_ATTESTATION_PROFILE_ID,
+    DeploymentAttestationObservationProfile, DeploymentStatusObservation,
+    OBSERVATION_SCHEMA_VERSION, ObservationRecord, ObservedOrMissing, ProviderSignatureRecord,
+    RawPayloadDescriptor, RetractionStatus, TenantVisibility,
 };
 
 use crate::connector::{
@@ -21,7 +23,8 @@ use crate::connector::{
 };
 
 const FEED_SCHEMA_VERSION: u16 = 1;
-const PROFILE_ID: &str = "org.diewan.piteka.evidence-export.v1";
+const PROFILE_ID: &str = DEPLOYMENT_ATTESTATION_PROFILE_ID;
+const ATTESTATION_REGISTRY_ID: &str = "org.diewan.evidence.attestation.v1";
 const MEDIA_TYPE: &str = "application/vnd.diewan.piteka-evidence-export+json";
 const SIGNATURE_DOMAIN: &[u8] = b"diewan.piteka.evidence-feed.v1\0";
 
@@ -301,6 +304,7 @@ impl SourceConnector for PitekaEvidenceFeedConnector {
             .map_err(|_| ConnectorError::InvalidField("piteka_feed.payload"))?;
         manifest.validate()?;
         let observation_id = observation_id(&export);
+        let deployment_profile = manifest.deployment_profile()?;
         Ok(ObservationCandidate {
             observation: ObservationRecord {
                 schema_version: OBSERVATION_SCHEMA_VERSION,
@@ -337,6 +341,7 @@ impl SourceConnector for PitekaEvidenceFeedConnector {
                 custody_locator: None,
                 retention_class_id: self.config.retention_class_id.clone(),
             }),
+            deployment_profile: Some(deployment_profile),
         })
     }
 
@@ -372,11 +377,11 @@ impl SourceConnector for PitekaEvidenceFeedConnector {
 struct ExportManifest {
     bundle_version: String,
     receipt: ExportReceipt,
-    dispatch_evidence: Vec<serde_json::Value>,
-    target_evidence: Vec<serde_json::Value>,
-    evidence_gaps: Vec<serde_json::Value>,
-    source_attribution: serde_json::Value,
-    missing_evidence: serde_json::Value,
+    dispatch_evidence: Vec<ExportEvidenceDescriptor>,
+    target_evidence: Vec<ExportEvidenceDescriptor>,
+    evidence_gaps: Vec<ExportGapDescriptor>,
+    source_attribution: ExportSourceAttribution,
+    missing_evidence: ExportMissingEvidence,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -387,6 +392,33 @@ struct ExportReceipt {
     attempt_id: String,
     outcome: String,
     created_at: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportEvidenceDescriptor {
+    node_id: String,
+    registry_id: String,
+    source: String,
+    content_digest: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportGapDescriptor {
+    node_id: String,
+    content_digest: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportSourceAttribution {
+    piteka_claims: u64,
+    provider_observations: u64,
+    verifier_conclusions: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportMissingEvidence {
+    gap_count: usize,
+    gaps: Vec<String>,
 }
 impl ExportManifest {
     fn validate(&self) -> ConnectorResult<()> {
@@ -402,15 +434,107 @@ impl ExportManifest {
         ] {
             validate_text(v, f)?;
         }
+        if self.missing_evidence.gap_count != self.evidence_gaps.len()
+            || self.missing_evidence.gaps.len() != self.evidence_gaps.len()
+        {
+            return Err(ConnectorError::InvalidField("piteka_feed.missing_evidence"));
+        }
+        for node in self.dispatch_evidence.iter().chain(&self.target_evidence) {
+            validate_text(&node.node_id, "evidence.node_id")?;
+            validate_text(&node.registry_id, "evidence.registry_id")?;
+            validate_text(&node.source, "evidence.source")?;
+            decode_sha256(&node.content_digest)?;
+        }
+        for gap in &self.evidence_gaps {
+            validate_text(&gap.node_id, "gap.node_id")?;
+            decode_sha256(&gap.content_digest)?;
+        }
         let _ = (
-            &self.dispatch_evidence,
-            &self.target_evidence,
-            &self.evidence_gaps,
-            &self.source_attribution,
-            &self.missing_evidence,
+            self.source_attribution.piteka_claims,
+            self.source_attribution.provider_observations,
+            self.source_attribution.verifier_conclusions,
         );
         Ok(())
     }
+
+    fn deployment_profile(&self) -> ConnectorResult<DeploymentAttestationObservationProfile> {
+        let evidence_refs = self
+            .target_evidence
+            .iter()
+            .map(|node| node.node_id.clone())
+            .collect();
+        let status_history = ObservedOrMissing::Observed {
+            value: vec![DeploymentStatusObservation {
+                status: self.receipt.outcome.clone(),
+                asserted_at: self.receipt.created_at,
+                evidence_refs,
+            }],
+        };
+
+        let attestations = self
+            .dispatch_evidence
+            .iter()
+            .chain(&self.target_evidence)
+            .filter(|node| node.registry_id == ATTESTATION_REGISTRY_ID)
+            .collect::<Vec<_>>();
+        let artifact_attestation = match attestations.as_slice() {
+            [] => ObservedOrMissing::Missing {
+                reasons: missing_reasons(&self.missing_evidence.gaps, "artifact attestation"),
+            },
+            [node] => ObservedOrMissing::Observed {
+                value: ArtifactAttestationObservation {
+                    digest_algorithm: "sha-256".to_string(),
+                    artifact_digest: ObservedOrMissing::Missing {
+                        reasons: missing_reasons(&self.missing_evidence.gaps, "artifact digest"),
+                    },
+                    attestation_digest: decode_sha256(&node.content_digest)?,
+                    attestation_evidence_refs: vec![node.node_id.clone()],
+                },
+            },
+            _ => {
+                return Err(ConnectorError::InvalidField(
+                    "piteka_feed.ambiguous_artifact_attestation",
+                ));
+            }
+        };
+
+        Ok(DeploymentAttestationObservationProfile {
+            schema_version: OBSERVATION_SCHEMA_VERSION,
+            receipt_id: self.receipt.receipt_id.clone(),
+            mandate_id: self.receipt.mandate_id.clone(),
+            intent_id: self.receipt.intent_id.clone(),
+            attempt_id: self.receipt.attempt_id.clone(),
+            status_history,
+            workflow_identity: ObservedOrMissing::Missing {
+                reasons: missing_reasons(&self.missing_evidence.gaps, "workflow identity"),
+            },
+            artifact_attestation,
+        })
+    }
+}
+
+fn missing_reasons(reported: &[String], class: &str) -> Vec<String> {
+    let matching = reported
+        .iter()
+        .filter(|reason| reason.to_ascii_lowercase().contains(class))
+        .cloned()
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        vec![format!("{class} was not disclosed by the source export")]
+    } else {
+        matching
+    }
+}
+
+fn decode_sha256(value: &str) -> ConnectorResult<[u8; 32]> {
+    let bytes = hex::decode(value).map_err(|_| ConnectorError::InvalidField("evidence.digest"))?;
+    let digest: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| ConnectorError::InvalidField("evidence.digest"))?;
+    if digest == [0; 32] {
+        return Err(ConnectorError::InvalidField("evidence.digest"));
+    }
+    Ok(digest)
 }
 
 fn event_id(e: &SignedPitekaExport) -> String {
@@ -509,7 +633,7 @@ mod tests {
         }
     }
     fn payload(receipt: &str) -> Vec<u8> {
-        format!(r#"{{"bundle_version":"0.1","receipt":{{"receipt_id":"{receipt}","mandate_id":"mandate-1","intent_id":"intent-1","attempt_id":"attempt-1","outcome":"succeeded","created_at":10}},"dispatch_evidence":[],"target_evidence":[],"evidence_gaps":[],"source_attribution":{{}},"missing_evidence":{{}}}}"#).into_bytes()
+        format!(r#"{{"bundle_version":"0.1","receipt":{{"receipt_id":"{receipt}","mandate_id":"mandate-1","intent_id":"intent-1","attempt_id":"attempt-1","outcome":"succeeded","created_at":10}},"dispatch_evidence":[],"target_evidence":[],"evidence_gaps":[],"source_attribution":{{"piteka_claims":0,"provider_observations":0,"verifier_conclusions":0}},"missing_evidence":{{"gap_count":0,"gaps":[]}}}}"#).into_bytes()
     }
     fn signed(
         key: &SigningKey,
@@ -573,6 +697,19 @@ mod tests {
             first.observation.observation_id,
             "observation:piteka:export-1:revision:1"
         );
+        let profile = first.deployment_profile.expect("typed deployment profile");
+        assert!(matches!(
+            profile.status_history,
+            ObservedOrMissing::Observed { ref value } if value[0].status == "succeeded"
+        ));
+        assert!(matches!(
+            profile.workflow_identity,
+            ObservedOrMissing::Missing { ref reasons } if !reasons.is_empty()
+        ));
+        assert!(matches!(
+            profile.artifact_attestation,
+            ObservedOrMissing::Missing { ref reasons } if !reasons.is_empty()
+        ));
         assert_eq!(
             connector.checkpoint(&batch).expect("checkpoint").bytes,
             1_u64.to_be_bytes()
@@ -633,5 +770,45 @@ mod tests {
             .expect("object")
             .insert("authorized".into(), serde_json::json!(true));
         assert!(serde_json::from_value::<SignedPitekaExport>(envelope).is_err());
+    }
+
+    #[test]
+    fn rejects_ambiguous_artifact_attestations_and_malformed_digests() {
+        let descriptor = |id: &str, digest: &str| ExportEvidenceDescriptor {
+            node_id: id.into(),
+            registry_id: ATTESTATION_REGISTRY_ID.into(),
+            source: "provider".into(),
+            content_digest: digest.into(),
+        };
+        let manifest = ExportManifest {
+            bundle_version: "0.1".into(),
+            receipt: ExportReceipt {
+                receipt_id: "receipt-1".into(),
+                mandate_id: "mandate-1".into(),
+                intent_id: "intent-1".into(),
+                attempt_id: "attempt-1".into(),
+                outcome: "succeeded".into(),
+                created_at: 10,
+            },
+            dispatch_evidence: vec![
+                descriptor("attestation-1", &hex::encode([1; 32])),
+                descriptor("attestation-2", &hex::encode([2; 32])),
+            ],
+            target_evidence: Vec::new(),
+            evidence_gaps: Vec::new(),
+            source_attribution: ExportSourceAttribution {
+                piteka_claims: 0,
+                provider_observations: 0,
+                verifier_conclusions: 0,
+            },
+            missing_evidence: ExportMissingEvidence {
+                gap_count: 0,
+                gaps: Vec::new(),
+            },
+        };
+        assert!(manifest.deployment_profile().is_err());
+
+        let malformed = descriptor("attestation-1", "00");
+        assert!(decode_sha256(&malformed.content_digest).is_err());
     }
 }

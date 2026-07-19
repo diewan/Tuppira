@@ -12,8 +12,8 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 
 use tuppira_shared::{
-    TuppiraError, Network, PriorityAddress, PriorityIndexingStatus, PriorityLevel, Result,
-    SanadRecord, SealRecord, TransferRecord,
+    Network, PriorityAddress, PriorityIndexingStatus, PriorityLevel, Result, SanadRecord,
+    SealRecord, TransferRecord, TuppiraError,
 };
 
 use crate::chain_indexer::ChainIndexer;

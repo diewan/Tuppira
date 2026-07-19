@@ -24,4 +24,4 @@ pub mod error;
 #[cfg(not(target_arch = "wasm32"))]
 pub use config::{ApiConfig, ChainConfig, TuppiraConfig};
 #[cfg(not(target_arch = "wasm32"))]
-pub use error::{TuppiraError, Result};
+pub use error::{Result, TuppiraError};

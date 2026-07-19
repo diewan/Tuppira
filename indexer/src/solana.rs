@@ -15,9 +15,8 @@ use super::chain_indexer::{AddressIndexingResult, ChainIndexer, ChainResult};
 use super::rpc_manager::RpcManager;
 use tuppira_shared::{
     ChainConfig, CommitmentScheme, ContractStatus, ContractType, CsvContract, EnhancedSanadRecord,
-    EnhancedSealRecord, EnhancedTransferRecord, TuppiraError, FinalityProofType,
-    InclusionProofType, Network, PriorityLevel, SanadRecord, SealRecord, SealStatus, SealType,
-    TransferRecord,
+    EnhancedSealRecord, EnhancedTransferRecord, FinalityProofType, InclusionProofType, Network,
+    PriorityLevel, SanadRecord, SealRecord, SealStatus, SealType, TransferRecord, TuppiraError,
 };
 
 pub struct SolanaIndexer {

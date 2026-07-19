@@ -6,7 +6,7 @@
 ///   health      - Check API health
 use clap::{Parser, Subcommand};
 use tuppira_api::ApiServer;
-use tuppira_shared::{TuppiraConfig, Result};
+use tuppira_shared::{Result, TuppiraConfig};
 
 /// Tuppira API - GraphQL and REST API server
 #[derive(Parser)]

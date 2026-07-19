@@ -8,7 +8,7 @@
 ///   reset       - Reset sync progress
 use clap::{Parser, Subcommand};
 use tuppira_indexer::Indexer;
-use tuppira_shared::{TuppiraConfig, Result};
+use tuppira_shared::{Result, TuppiraConfig};
 use tuppira_storage::init_pool;
 
 /// Tuppira Indexer - Multi-chain indexing daemon

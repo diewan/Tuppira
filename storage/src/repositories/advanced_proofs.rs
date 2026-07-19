@@ -1,3 +1,5 @@
+use sqlx::{Row, SqlitePool};
+use std::str::FromStr;
 /// Repository for advanced commitment and proof metadata.
 ///
 /// Handles storage and querying of commitment schemes, proof types,
@@ -8,8 +10,6 @@ use tuppira_shared::{
     InclusionProofType, ProofStatistics, ProofVerificationStatus, SanadProofFilter, SchemeCount,
     SealProofCount, SealProofFilter,
 };
-use sqlx::{Row, SqlitePool};
-use std::str::FromStr;
 
 /// Repository for advanced commitment and proof data.
 #[derive(Clone)]

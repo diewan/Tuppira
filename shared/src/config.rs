@@ -329,9 +329,7 @@ mod tests {
         let result = TuppiraConfig::default_config().and_then(|config| {
             config.with_database_url_override(Some("sqlite:///data/tuppira.db".to_string()))
         });
-        assert!(
-            matches!(result, Ok(config) if config.database.url == "sqlite:///data/tuppira.db")
-        );
+        assert!(matches!(result, Ok(config) if config.database.url == "sqlite:///data/tuppira.db"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 /// Repository for aggregate statistics queries.
 use sqlx::SqlitePool;
 
-use tuppira_shared::{ChainCount, ChainPairCount, TuppiraStats, Result};
+use tuppira_shared::{ChainCount, ChainPairCount, Result, TuppiraStats};
 
 /// Repository for aggregate statistics.
 #[derive(Clone)]

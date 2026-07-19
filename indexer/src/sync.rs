@@ -15,16 +15,16 @@ use tokio::time::sleep;
 use super::chain_indexer::{AddressIndexingResult, BlockIndexResult, ChainIndexer, ChainResult};
 use tuppira_shared::{
     ChainConfig, ChainInfo, ChainStatus, CommitmentScheme, CsvContract, EnhancedSanadRecord,
-    EnhancedSealRecord, EnhancedTransferRecord, TuppiraError, TuppiraEventDto, FinalityProofType,
-    InclusionProofType, IndexerStatus, Network, PriorityLevel, SanadRecord, SealRecord,
-    TransferRecord,
+    EnhancedSealRecord, EnhancedTransferRecord, FinalityProofType, InclusionProofType,
+    IndexerStatus, Network, PriorityLevel, SanadRecord, SealRecord, TransferRecord, TuppiraError,
+    TuppiraEventDto,
 };
 
+use sqlx::SqlitePool;
 use tuppira_storage::repositories::{
     AdvancedProofRepository, ContractsRepository, SanadsRepository, SealsRepository,
     SyncRepository, TransfersRepository,
 };
-use sqlx::SqlitePool;
 
 /// Sync coordinator that manages multiple chain indexers.
 pub struct SyncCoordinator {

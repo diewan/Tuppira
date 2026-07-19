@@ -10,8 +10,8 @@ use tuppira_storage::repositories::{
     SanadsRepository, SealsRepository, StatsRepository, TransfersRepository,
 };
 
-use tuppira_shared::{TuppiraError, SanadFilter, SealFilter, TransferFilter};
 use std::str::FromStr;
+use tuppira_shared::{SanadFilter, SealFilter, TransferFilter, TuppiraError};
 
 // ---------------------------------------------------------------------------
 // Application state
@@ -138,8 +138,7 @@ pub async fn list_sanads(
 pub async fn get_sanad(
     Path(id): Path<String>,
     State((_, pool, _, _)): State<AppState>,
-) -> Result<Json<ApiResponse<tuppira_shared::SanadRecord>>, (StatusCode, Json<ErrorResponse>)>
-{
+) -> Result<Json<ApiResponse<tuppira_shared::SanadRecord>>, (StatusCode, Json<ErrorResponse>)> {
     let repo = SanadsRepository::new(pool);
 
     let sanad = repo.get_by_id(&id).await.map_err(tuppira_error)?;
@@ -212,8 +211,7 @@ pub async fn list_transfers(
 pub async fn get_transfer(
     Path(id): Path<String>,
     State((_, pool, _, networks)): State<AppState>,
-) -> Result<Json<ApiResponse<tuppira_shared::TransferRecord>>, (StatusCode, Json<ErrorResponse>)>
-{
+) -> Result<Json<ApiResponse<tuppira_shared::TransferRecord>>, (StatusCode, Json<ErrorResponse>)> {
     let repo = TransfersRepository::new(pool);
 
     let mut transfer = repo.get(&id).await.map_err(tuppira_error)?;
@@ -329,8 +327,7 @@ pub async fn get_seal(
 /// GET /api/v1/stats
 pub async fn get_stats(
     State((_, pool, _, _)): State<AppState>,
-) -> Result<Json<ApiResponse<tuppira_shared::TuppiraStats>>, (StatusCode, Json<ErrorResponse>)>
-{
+) -> Result<Json<ApiResponse<tuppira_shared::TuppiraStats>>, (StatusCode, Json<ErrorResponse>)> {
     let repo = StatsRepository::new(pool);
 
     let stats = repo.get_stats().await.map_err(tuppira_error)?;
@@ -345,8 +342,7 @@ pub async fn get_stats(
 /// GET /api/v1/chains
 pub async fn list_chains(
     _state: State<AppState>,
-) -> Result<Json<ApiResponse<Vec<tuppira_shared::ChainInfo>>>, (StatusCode, Json<ErrorResponse>)>
-{
+) -> Result<Json<ApiResponse<Vec<tuppira_shared::ChainInfo>>>, (StatusCode, Json<ErrorResponse>)> {
     Err(service_unavailable(
         "chain status is unavailable: the explorer is not connected to an authoritative indexer status source",
     ))
@@ -530,10 +526,7 @@ pub async fn get_address_data(
         status: None,
         sanad_id: None,
     };
-    let seals = seals_repo
-        .list(seals_filter)
-        .await
-        .map_err(tuppira_error)?;
+    let seals = seals_repo.list(seals_filter).await.map_err(tuppira_error)?;
 
     // Get transfers for this address
     let transfers_repo = TransfersRepository::new(pool.clone());
@@ -573,10 +566,8 @@ pub async fn get_address_data(
 pub async fn get_address_sanads(
     Path(address): Path<String>,
     State((_, pool, _, _)): State<AppState>,
-) -> Result<
-    Json<ApiResponse<Vec<tuppira_shared::SanadRecord>>>,
-    (StatusCode, Json<ErrorResponse>),
-> {
+) -> Result<Json<ApiResponse<Vec<tuppira_shared::SanadRecord>>>, (StatusCode, Json<ErrorResponse>)>
+{
     let repo = SanadsRepository::new(pool);
 
     let filter = SanadFilter {
@@ -596,10 +587,7 @@ pub async fn get_address_sanads(
 pub async fn get_address_seals(
     Path(_address): Path<String>,
     State((_, pool, _, _)): State<AppState>,
-) -> Result<
-    Json<ApiResponse<Vec<tuppira_shared::SealRecord>>>,
-    (StatusCode, Json<ErrorResponse>),
-> {
+) -> Result<Json<ApiResponse<Vec<tuppira_shared::SealRecord>>>, (StatusCode, Json<ErrorResponse>)> {
     let repo = SealsRepository::new(pool);
 
     let filter = SealFilter {
@@ -620,10 +608,8 @@ pub async fn get_address_seals(
 pub async fn get_address_transfers(
     Path(address): Path<String>,
     State((_, pool, _, _)): State<AppState>,
-) -> Result<
-    Json<ApiResponse<Vec<tuppira_shared::TransferRecord>>>,
-    (StatusCode, Json<ErrorResponse>),
-> {
+) -> Result<Json<ApiResponse<Vec<tuppira_shared::TransferRecord>>>, (StatusCode, Json<ErrorResponse>)>
+{
     let repo = TransfersRepository::new(pool);
 
     let filter = TransferFilter {
@@ -787,10 +773,8 @@ pub async fn list_enhanced_sanads(
 pub async fn get_enhanced_sanad(
     Path(id): Path<String>,
     State((_, pool, _, _)): State<AppState>,
-) -> Result<
-    Json<ApiResponse<tuppira_shared::EnhancedSanadRecord>>,
-    (StatusCode, Json<ErrorResponse>),
-> {
+) -> Result<Json<ApiResponse<tuppira_shared::EnhancedSanadRecord>>, (StatusCode, Json<ErrorResponse>)>
+{
     use tuppira_shared::SanadProofFilter;
     use tuppira_storage::repositories::AdvancedProofRepository;
 
@@ -853,10 +837,8 @@ pub async fn list_enhanced_seals(
 pub async fn get_enhanced_seal(
     Path(id): Path<String>,
     State((_, pool, _, _)): State<AppState>,
-) -> Result<
-    Json<ApiResponse<tuppira_shared::EnhancedSealRecord>>,
-    (StatusCode, Json<ErrorResponse>),
-> {
+) -> Result<Json<ApiResponse<tuppira_shared::EnhancedSealRecord>>, (StatusCode, Json<ErrorResponse>)>
+{
     use tuppira_shared::SealProofFilter;
     use tuppira_storage::repositories::AdvancedProofRepository;
 
@@ -887,10 +869,7 @@ pub async fn get_enhanced_seal(
 /// GET /api/v1/proofs/statistics
 pub async fn get_proof_statistics(
     State((_, pool, _, _)): State<AppState>,
-) -> Result<
-    Json<ApiResponse<tuppira_shared::ProofStatistics>>,
-    (StatusCode, Json<ErrorResponse>),
-> {
+) -> Result<Json<ApiResponse<tuppira_shared::ProofStatistics>>, (StatusCode, Json<ErrorResponse>)> {
     use tuppira_storage::repositories::AdvancedProofRepository;
 
     let repo = AdvancedProofRepository::new(pool);

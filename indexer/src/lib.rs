@@ -34,8 +34,8 @@ pub use rpc_manager::{AuthType, RpcConfig, RpcEndpoint, RpcManager, RpcType, loa
 pub use sync::SyncCoordinator;
 pub use wallet_bridge::{WalletIndexerBridge, WalletIndexerBridgeConfig};
 
-use tuppira_shared::{TuppiraConfig, Result};
 use sqlx::SqlitePool;
+use tuppira_shared::{Result, TuppiraConfig};
 
 /// The main indexer that wraps all chain indexers.
 pub struct Indexer {

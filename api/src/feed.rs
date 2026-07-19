@@ -95,10 +95,9 @@ impl Default for WalletFeedHub {
 mod tests {
     use chrono::Utc;
     use tuppira_shared::{
-        ChainId, TUPPIRA_EVENT_SCHEMA_VERSION, TuppiraEventDto, TuppiraEventPayload,
-        TuppiraEventType, TuppiraFinality, FeedProvenance, IndexerFreshness,
-        IndexerFreshnessStatus, Network, ObservedBlock, PROTOCOL_VERSION,
-        WALLET_FEED_SCHEMA_VERSION, WalletFeedEnvelope,
+        ChainId, FeedProvenance, IndexerFreshness, IndexerFreshnessStatus, Network, ObservedBlock,
+        PROTOCOL_VERSION, TUPPIRA_EVENT_SCHEMA_VERSION, TuppiraEventDto, TuppiraEventPayload,
+        TuppiraEventType, TuppiraFinality, WALLET_FEED_SCHEMA_VERSION, WalletFeedEnvelope,
     };
 
     use super::WalletFeedHub;

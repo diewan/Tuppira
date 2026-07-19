@@ -4,10 +4,10 @@
 //! chain may be enabled only after its signed deployment manifest entry has
 //! been checked against the operator's selected network.
 
-use tuppira_shared::{ChainConfig, TuppiraError, Network};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
+use tuppira_shared::{ChainConfig, Network, TuppiraError};
 
 #[derive(Debug, Deserialize)]
 struct DeploymentManifest {
@@ -108,9 +108,9 @@ fn validate_identifier(chain_id: &str, deployment: &Deployment) -> Result<(), Tu
 #[cfg(test)]
 mod tests {
     use super::validate_enabled_chains;
-    use tuppira_shared::{ChainConfig, Network};
     use std::collections::HashMap;
     use std::fs;
+    use tuppira_shared::{ChainConfig, Network};
 
     #[test]
     fn unsigned_manifest_cannot_enable_a_chain() {
