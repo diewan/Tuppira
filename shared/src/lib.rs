@@ -8,8 +8,12 @@ pub mod types;
 /// Official block-explorer link construction for the chains Parwana touches.
 pub mod block_explorer;
 
+/// Source-neutral observation-plane projections and validation.
+pub mod observation;
+
 // Re-export commonly used types at the crate root for convenience.
 pub use advanced_types::*;
+pub use observation::*;
 pub use types::*;
 
 // Server-only modules

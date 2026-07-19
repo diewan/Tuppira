@@ -22,9 +22,21 @@ use tuppira_storage::init_pool;
 use crate::feed::WalletFeedHub;
 use crate::graphql::{create_schema, schema::GraphqlContext};
 use crate::rest;
-use tuppira_shared::{ApiConfig, Network, TuppiraConfig, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tuppira_shared::{ApiConfig, Network, Result, TuppiraConfig};
+
+type ApiSchema = async_graphql::Schema<
+    crate::graphql::schema::Query,
+    crate::graphql::schema::Mutation,
+    crate::graphql::schema::Subscription,
+>;
+type ApiState = (
+    ApiSchema,
+    SqlitePool,
+    WalletFeedHub,
+    Arc<HashMap<String, Network>>,
+);
 
 /// The API server.
 pub struct ApiServer {
@@ -101,9 +113,7 @@ impl ApiServer {
         Server::bind(&addr)
             .serve(app.into_make_service())
             .await
-            .map_err(|e| {
-                tuppira_shared::TuppiraError::Internal(format!("Server error: {}", e))
-            })?;
+            .map_err(|e| tuppira_shared::TuppiraError::Internal(format!("Server error: {}", e)))?;
 
         Ok(())
     }
@@ -142,16 +152,7 @@ async fn graphql_playground() -> impl IntoResponse {
 
 /// GraphQL request handler.
 async fn graphql_handler(
-    State((schema, _, _, _)): State<(
-        async_graphql::Schema<
-            crate::graphql::schema::Query,
-            crate::graphql::schema::Mutation,
-            crate::graphql::schema::Subscription,
-        >,
-        SqlitePool,
-        WalletFeedHub,
-        Arc<HashMap<String, Network>>,
-    )>,
+    State((schema, _, _, _)): State<ApiState>,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
     let inner_req = req.into_inner();
@@ -166,18 +167,7 @@ async fn metrics_handler() -> impl IntoResponse {
 }
 
 /// Health check handler.
-async fn health_handler(
-    State((_, pool, _, _)): State<(
-        async_graphql::Schema<
-            crate::graphql::schema::Query,
-            crate::graphql::schema::Mutation,
-            crate::graphql::schema::Subscription,
-        >,
-        SqlitePool,
-        WalletFeedHub,
-        Arc<HashMap<String, Network>>,
-    )>,
-) -> impl IntoResponse {
+async fn health_handler(State((_, pool, _, _)): State<ApiState>) -> impl IntoResponse {
     if sqlx::query_scalar::<_, i64>("SELECT 1")
         .fetch_one(&pool)
         .await
