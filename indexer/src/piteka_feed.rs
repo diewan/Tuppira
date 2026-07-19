@@ -364,6 +364,7 @@ impl SourceConnector for PitekaEvidenceFeedConnector {
             subject_ref: subject_ref.to_string(),
             reorgs: Vec::new(),
             supersessions: Vec::new(),
+            contradictions: Vec::new(),
         })
     }
 

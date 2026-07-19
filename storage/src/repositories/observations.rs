@@ -2,8 +2,9 @@
 
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use tuppira_shared::{
-    CollectionRunRecord, ObservationRecord, RawPayloadDescriptor, Result, RetentionClassRecord,
-    RetractionStatus, SourceRecord, SyncCursorRecord, TenantVisibility, TuppiraError,
+    CollectionRunRecord, ContradictionHintRecord, ObservationRecord, RawPayloadDescriptor,
+    ReorgRecord, Result, RetentionClassRecord, RetractionStatus, SourceRecord, SyncCursorRecord,
+    TenantVisibility, TuppiraError,
 };
 
 /// Observation-plane repository. Inserts validate at the typed boundary and
@@ -213,6 +214,64 @@ impl ObservationRepository {
             observed_at: to_u64(row.try_get::<i64, _>("observed_at")?, "observed_at")?,
         })
     }
+
+    /// Persist a detected source-history discontinuity without changing any observation.
+    pub async fn append_reorg(&self, record: &ReorgRecord) -> Result<()> {
+        ensure_version(record.schema_version)?;
+        ensure_text(&record.reorg_id, "reorg_id")?;
+        ensure_text(&record.source_id, "source_id")?;
+        ensure_text(&record.prior_tip, "prior_tip")?;
+        ensure_text(&record.replacement_tip, "replacement_tip")?;
+        if record.detected_at == 0 || record.prior_tip == record.replacement_tip {
+            return Err(invalid("invalid source reorg"));
+        }
+        sqlx::query("INSERT INTO source_reorgs (reorg_id, schema_version, source_id, detected_at, prior_tip, replacement_tip) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(&record.reorg_id).bind(i64::from(record.schema_version)).bind(&record.source_id)
+            .bind(required_i64(record.detected_at, "detected_at")?).bind(&record.prior_tip)
+            .bind(&record.replacement_tip).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Preserve a non-authoritative provider disagreement. Database constraints
+    /// reject same-source, unrelated-subject, and cross-tenant pairs.
+    pub async fn append_contradiction_hint(
+        &self,
+        record: &ContradictionHintRecord,
+        detected_at: u64,
+    ) -> Result<()> {
+        ensure_version(record.schema_version)?;
+        ensure_text(&record.hint_id, "hint_id")?;
+        ensure_text(&record.left_observation_id, "left_observation_id")?;
+        ensure_text(&record.right_observation_id, "right_observation_id")?;
+        ensure_text(&record.detector_id, "detector_id")?;
+        if record.left_observation_id == record.right_observation_id || detected_at == 0 {
+            return Err(invalid("invalid contradiction hint"));
+        }
+        sqlx::query("INSERT INTO contradiction_hints (hint_id, schema_version, left_observation_id, right_observation_id, detector_id, detected_at) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(&record.hint_id).bind(i64::from(record.schema_version))
+            .bind(&record.left_observation_id).bind(&record.right_observation_id)
+            .bind(&record.detector_id).bind(required_i64(detected_at, "detected_at")?)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn reorg_history(&self, source_id: &str) -> Result<Vec<ReorgRecord>> {
+        ensure_text(source_id, "source_id")?;
+        let rows = sqlx::query("SELECT schema_version, reorg_id, source_id, detected_at, prior_tip, replacement_tip FROM source_reorgs WHERE source_id = ? ORDER BY detected_at, reorg_id")
+            .bind(source_id).fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ReorgRecord {
+                    schema_version: to_u16(row.try_get("schema_version")?, "schema_version")?,
+                    reorg_id: row.try_get("reorg_id")?,
+                    source_id: row.try_get("source_id")?,
+                    detected_at: to_u64(row.try_get("detected_at")?, "detected_at")?,
+                    prior_tip: row.try_get("prior_tip")?,
+                    replacement_tip: row.try_get("replacement_tip")?,
+                })
+            })
+            .collect()
+    }
 }
 
 fn optional_u64(value: Option<i64>, field: &str) -> Result<Option<u64>> {
@@ -413,6 +472,25 @@ mod tests {
         Ok(repository)
     }
 
+    async fn add_source(repository: &ObservationRepository, source_id: &str, run_id: &str) {
+        let source = SourceRecord {
+            schema_version: 1,
+            source_id: source_id.into(),
+            connector_kind: "provider-fixture".into(),
+            display_name: source_id.into(),
+            retention_class_id: "retention:audit".into(),
+        };
+        assert!(repository.insert_source(&source).await.is_ok());
+        let run = CollectionRunRecord {
+            schema_version: 1,
+            collection_run_id: run_id.into(),
+            source_id: source_id.into(),
+            started_at: 10,
+            completed_at: Some(11),
+        };
+        assert!(repository.insert_collection_run(&run).await.is_ok());
+    }
+
     fn observation(id: &str, digest_byte: u8, supersedes: Option<&str>) -> ObservationRecord {
         ObservationRecord {
             schema_version: OBSERVATION_SCHEMA_VERSION,
@@ -445,6 +523,147 @@ mod tests {
             cursor: vec![1, 2, 3],
             observed_at: time,
         }
+    }
+
+    fn for_source(
+        mut value: ObservationRecord,
+        source: &str,
+        event: &str,
+        run: &str,
+    ) -> ObservationRecord {
+        value.source_id = source.into();
+        value.source_event_id = event.into();
+        value.collection_run_id = run.into();
+        value
+    }
+
+    fn cursor_for(source: &str, time: u64) -> SyncCursorRecord {
+        SyncCursorRecord {
+            source_id: source.into(),
+            ..cursor(time)
+        }
+    }
+
+    #[tokio::test]
+    async fn preserves_chain_reorg_history_without_overwriting_observations() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let original = observation("obs:chain:old", 1, None);
+        assert!(
+            repository
+                .append_observation(&original, &cursor(12))
+                .await
+                .is_ok()
+        );
+        let reorg = ReorgRecord {
+            schema_version: 1,
+            reorg_id: "reorg:fixture:1".into(),
+            source_id: "source:piteka".into(),
+            detected_at: 13,
+            prior_tip: "block:100:a".into(),
+            replacement_tip: "block:100:b".into(),
+        };
+        assert!(repository.append_reorg(&reorg).await.is_ok());
+        assert_eq!(
+            repository.reorg_history("source:piteka").await.ok(),
+            Some(vec![reorg])
+        );
+        assert_eq!(
+            repository.get_observation("obs:chain:old").await.ok(),
+            Some(original)
+        );
+        let overwrite = sqlx::query("UPDATE source_reorgs SET replacement_tip = 'block:other' WHERE reorg_id = 'reorg:fixture:1'")
+            .execute(&repository.pool).await;
+        assert!(overwrite.is_err());
+    }
+
+    #[tokio::test]
+    async fn preserves_cross_provider_disagreement_and_rejects_ambiguous_pairs() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        add_source(&repository, "source:provider-b", "run:b").await;
+        let left = observation("obs:provider:a", 1, None);
+        let right = for_source(
+            observation("obs:provider:b", 2, None),
+            "source:provider-b",
+            "event:b",
+            "run:b",
+        );
+        assert!(
+            repository
+                .append_observation(&left, &cursor(12))
+                .await
+                .is_ok()
+        );
+        assert!(
+            repository
+                .append_observation(&right, &cursor_for("source:provider-b", 12))
+                .await
+                .is_ok()
+        );
+        let hint = ContradictionHintRecord {
+            schema_version: 1,
+            hint_id: "hint:fixture:1".into(),
+            left_observation_id: left.observation_id.clone(),
+            right_observation_id: right.observation_id.clone(),
+            detector_id: "detector:fixture:v1".into(),
+        };
+        assert!(
+            repository
+                .append_contradiction_hint(&hint, 13)
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            repository.get_observation(&left.observation_id).await.ok(),
+            Some(left.clone())
+        );
+        assert_eq!(
+            repository.get_observation(&right.observation_id).await.ok(),
+            Some(right)
+        );
+
+        let same_source = ContradictionHintRecord {
+            hint_id: "hint:same-source".into(),
+            right_observation_id: left.observation_id.clone(),
+            ..hint.clone()
+        };
+        assert!(
+            repository
+                .append_contradiction_hint(&same_source, 14)
+                .await
+                .is_err()
+        );
+
+        let mut foreign = for_source(
+            observation("obs:tenant:other", 3, None),
+            "source:provider-b",
+            "event:foreign",
+            "run:b",
+        );
+        foreign.tenant_visibility = TenantVisibility::Tenant {
+            tenant_id: "tenant:other".into(),
+        };
+        foreign.observed_at = 15;
+        assert!(
+            repository
+                .append_observation(&foreign, &cursor_for("source:provider-b", 15))
+                .await
+                .is_ok()
+        );
+        let cross_tenant = ContradictionHintRecord {
+            hint_id: "hint:cross-tenant".into(),
+            right_observation_id: foreign.observation_id,
+            ..hint
+        };
+        assert!(
+            repository
+                .append_contradiction_hint(&cross_tenant, 16)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

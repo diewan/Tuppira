@@ -8,8 +8,9 @@ use async_trait::async_trait;
 use std::collections::HashSet;
 
 use tuppira_shared::{
-    DeploymentAttestationObservationProfile, ObservationRecord, ProviderSignatureRecord,
-    RawPayloadDescriptor, ReorgRecord, SupersessionRecord, TenantVisibility, TuppiraError,
+    ContradictionHintRecord, DeploymentAttestationObservationProfile, ObservationRecord,
+    ProviderSignatureRecord, RawPayloadDescriptor, ReorgRecord, SupersessionRecord,
+    TenantVisibility, TuppiraError,
 };
 
 /// Maximum number of events returned by one bounded discovery call.
@@ -172,6 +173,62 @@ pub struct ReconciliationReport {
     pub subject_ref: String,
     pub reorgs: Vec<ReorgRecord>,
     pub supersessions: Vec<SupersessionRecord>,
+    pub contradictions: Vec<ContradictionHintRecord>,
+}
+
+impl ReconciliationReport {
+    /// Validate connector-owned reconciliation output before persistence. This
+    /// checks shape and source ownership; storage enforces relational and tenant invariants.
+    pub fn validate(&self, expected_source_id: &str) -> ConnectorResult<()> {
+        validate_id(&self.source_id, "reconciliation.source_id")?;
+        validate_id(&self.subject_ref, "reconciliation.subject_ref")?;
+        if self.source_id != expected_source_id {
+            return Err(ConnectorError::SourceMismatch {
+                expected: expected_source_id.to_string(),
+                actual: self.source_id.clone(),
+            });
+        }
+        for reorg in &self.reorgs {
+            validate_id(&reorg.reorg_id, "reconciliation.reorg_id")?;
+            validate_id(&reorg.prior_tip, "reconciliation.prior_tip")?;
+            validate_id(&reorg.replacement_tip, "reconciliation.replacement_tip")?;
+            if reorg.schema_version != 1
+                || reorg.source_id != self.source_id
+                || reorg.detected_at == 0
+                || reorg.prior_tip == reorg.replacement_tip
+            {
+                return Err(ConnectorError::InvalidField("reconciliation.reorg"));
+            }
+        }
+        for supersession in &self.supersessions {
+            validate_id(
+                &supersession.superseding_observation_id,
+                "reconciliation.superseding",
+            )?;
+            validate_id(
+                &supersession.superseded_observation_id,
+                "reconciliation.superseded",
+            )?;
+            if supersession.schema_version != 1
+                || supersession.observed_at == 0
+                || supersession.superseding_observation_id == supersession.superseded_observation_id
+            {
+                return Err(ConnectorError::InvalidField("reconciliation.supersession"));
+            }
+        }
+        for contradiction in &self.contradictions {
+            validate_id(&contradiction.hint_id, "reconciliation.hint_id")?;
+            validate_id(&contradiction.left_observation_id, "reconciliation.left")?;
+            validate_id(&contradiction.right_observation_id, "reconciliation.right")?;
+            validate_id(&contradiction.detector_id, "reconciliation.detector_id")?;
+            if contradiction.schema_version != 1
+                || contradiction.left_observation_id == contradiction.right_observation_id
+            {
+                return Err(ConnectorError::InvalidField("reconciliation.contradiction"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Connector liveness only. Health never asserts that source claims are true.
@@ -402,6 +459,7 @@ mod tests {
                 subject_ref: subject_ref.to_string(),
                 reorgs: Vec::new(),
                 supersessions: Vec::new(),
+                contradictions: Vec::new(),
             })
         }
 
@@ -569,6 +627,35 @@ mod tests {
         assert_eq!(
             authenticate_and_normalize(&connector, &empty, 1).await,
             Err(ConnectorError::BoundExceeded("raw_event.bytes"))
+        );
+    }
+
+    #[test]
+    fn reconciliation_rejects_cross_source_and_ambiguous_reorgs() {
+        let report = ReconciliationReport {
+            source_id: "source:fixture".into(),
+            subject_ref: "subject:1".into(),
+            reorgs: vec![ReorgRecord {
+                schema_version: 1,
+                reorg_id: "reorg:1".into(),
+                source_id: "source:fixture".into(),
+                detected_at: 10,
+                prior_tip: "tip:a".into(),
+                replacement_tip: "tip:b".into(),
+            }],
+            supersessions: Vec::new(),
+            contradictions: Vec::new(),
+        };
+        assert_eq!(report.validate("source:fixture"), Ok(()));
+        assert!(matches!(
+            report.validate("source:other"),
+            Err(ConnectorError::SourceMismatch { .. })
+        ));
+        let mut ambiguous = report;
+        ambiguous.reorgs[0].replacement_tip = ambiguous.reorgs[0].prior_tip.clone();
+        assert_eq!(
+            ambiguous.validate("source:fixture"),
+            Err(ConnectorError::InvalidField("reconciliation.reorg"))
         );
     }
 }
