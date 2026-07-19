@@ -5,6 +5,7 @@
 pub mod aptos;
 pub mod bitcoin;
 pub mod chain_indexer;
+pub mod connector;
 pub mod ethereum;
 pub mod indexer_plugin;
 pub mod manifest;
@@ -15,7 +16,14 @@ pub mod sui;
 pub mod sync;
 pub mod wallet_bridge;
 
-pub use chain_indexer::{AddressIndexingResult, ChainIndexer, ChainResult};
+pub use chain_indexer::{
+    AddressIndexingResult, ChainIndexer, ChainResult, LegacyChainConnectorAdapter,
+};
+pub use connector::{
+    ConnectorCursor, ConnectorError, ConnectorResult, ObservationCandidate, RawSourceBatch,
+    RawSourceEvent, ReconciliationReport, SourceAuthentication, SourceConnector, SourceHealth,
+    authenticate_and_normalize,
+};
 pub use indexer_plugin::{IndexerPluginRegistry, IndexerPluginRegistryBuilder};
 pub use rpc_manager::{AuthType, RpcConfig, RpcEndpoint, RpcManager, RpcType, load_rpc_config};
 pub use sync::SyncCoordinator;

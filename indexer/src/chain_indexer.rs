@@ -6,8 +6,8 @@ use async_trait::async_trait;
 
 use tuppira_shared::{
     CommitmentScheme, CsvContract, EnhancedSanadRecord, EnhancedSealRecord, EnhancedTransferRecord,
-    TuppiraError, TuppiraEventDto, FinalityProofType, InclusionProofType, Network, PriorityLevel,
-    SanadRecord, SealRecord, TransferRecord,
+    FinalityProofType, InclusionProofType, Network, PriorityLevel, SanadRecord, SealRecord,
+    TransferRecord, TuppiraError, TuppiraEventDto,
 };
 
 /// Result type alias for chain indexer operations.
@@ -123,6 +123,120 @@ pub trait ChainIndexer: Send + Sync {
 
     /// Detect finality proof type for this chain.
     fn detect_finality_proof_type(&self) -> FinalityProofType;
+}
+
+/// Compatibility adapter that keeps legacy chain indexing behavior reachable
+/// while new non-chain sources implement [`crate::connector::SourceConnector`].
+///
+/// This wrapper is intentionally only a delegator: it does not invent raw
+/// payloads, authentication results, or normalized observations from legacy
+/// records. Chain connectors can migrate those stages individually without a
+/// flag-day rewrite of the existing indexers.
+pub struct LegacyChainConnectorAdapter {
+    inner: Box<dyn ChainIndexer>,
+}
+
+impl LegacyChainConnectorAdapter {
+    pub fn new(inner: Box<dyn ChainIndexer>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl ChainIndexer for LegacyChainConnectorAdapter {
+    fn chain_id(&self) -> &str {
+        self.inner.chain_id()
+    }
+
+    fn chain_name(&self) -> &str {
+        self.inner.chain_name()
+    }
+
+    async fn initialize(&self) -> ChainResult<()> {
+        self.inner.initialize().await
+    }
+
+    async fn get_chain_tip(&self) -> ChainResult<u64> {
+        self.inner.get_chain_tip().await
+    }
+
+    async fn get_latest_synced_block(&self) -> ChainResult<u64> {
+        self.inner.get_latest_synced_block().await
+    }
+
+    async fn index_sanads(&self, block: u64) -> ChainResult<Vec<SanadRecord>> {
+        self.inner.index_sanads(block).await
+    }
+
+    async fn index_seals(&self, block: u64) -> ChainResult<Vec<SealRecord>> {
+        self.inner.index_seals(block).await
+    }
+
+    async fn index_transfers(&self, block: u64) -> ChainResult<Vec<TransferRecord>> {
+        self.inner.index_transfers(block).await
+    }
+
+    async fn index_contracts(&self, block: u64) -> ChainResult<Vec<CsvContract>> {
+        self.inner.index_contracts(block).await
+    }
+
+    async fn index_tuppira_events(&self, block: u64) -> ChainResult<Vec<TuppiraEventDto>> {
+        self.inner.index_tuppira_events(block).await
+    }
+
+    async fn process_block(&self, block: u64) -> ChainResult<BlockIndexResult> {
+        self.inner.process_block(block).await
+    }
+
+    async fn index_enhanced_sanads(&self, block: u64) -> ChainResult<Vec<EnhancedSanadRecord>> {
+        self.inner.index_enhanced_sanads(block).await
+    }
+
+    async fn index_enhanced_seals(&self, block: u64) -> ChainResult<Vec<EnhancedSealRecord>> {
+        self.inner.index_enhanced_seals(block).await
+    }
+
+    async fn index_enhanced_transfers(
+        &self,
+        block: u64,
+    ) -> ChainResult<Vec<EnhancedTransferRecord>> {
+        self.inner.index_enhanced_transfers(block).await
+    }
+
+    async fn index_sanads_by_address(&self, address: &str) -> ChainResult<Vec<SanadRecord>> {
+        self.inner.index_sanads_by_address(address).await
+    }
+
+    async fn index_seals_by_address(&self, address: &str) -> ChainResult<Vec<SealRecord>> {
+        self.inner.index_seals_by_address(address).await
+    }
+
+    async fn index_transfers_by_address(&self, address: &str) -> ChainResult<Vec<TransferRecord>> {
+        self.inner.index_transfers_by_address(address).await
+    }
+
+    async fn index_addresses_with_priority(
+        &self,
+        addresses: &[String],
+        priority: PriorityLevel,
+        network: Network,
+    ) -> ChainResult<AddressIndexingResult> {
+        self.inner
+            .index_addresses_with_priority(addresses, priority, network)
+            .await
+    }
+
+    fn detect_commitment_scheme(&self, data: &[u8]) -> Option<CommitmentScheme> {
+        self.inner.detect_commitment_scheme(data)
+    }
+
+    fn detect_inclusion_proof_type(&self) -> InclusionProofType {
+        self.inner.detect_inclusion_proof_type()
+    }
+
+    fn detect_finality_proof_type(&self) -> FinalityProofType {
+        self.inner.detect_finality_proof_type()
+    }
 }
 
 /// Result of processing a single block.

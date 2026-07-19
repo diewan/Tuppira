@@ -31,6 +31,7 @@ toml.workspace = true
 anyhow.workspace = true
 lazy_static.workspace = true
 sha3.workspace = true          # <-- keccak256 for Ethereum event signatures
+thiserror.workspace = true
 rand = "0.8"
 
 

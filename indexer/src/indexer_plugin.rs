@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::chain_indexer::ChainIndexer;
+use crate::chain_indexer::{ChainIndexer, LegacyChainConnectorAdapter};
 use crate::rpc_manager::RpcManager;
 use tuppira_shared::ChainConfig;
 
@@ -87,9 +87,12 @@ impl IndexerPluginRegistry {
         config: ChainConfig,
         rpc_manager: RpcManager,
     ) -> Option<Box<dyn ChainIndexer>> {
-        self.factories
-            .get(chain_id)
-            .map(|factory| factory(config, rpc_manager))
+        self.factories.get(chain_id).map(|factory| {
+            Box::new(LegacyChainConnectorAdapter::new(factory(
+                config,
+                rpc_manager,
+            ))) as Box<dyn ChainIndexer>
+        })
     }
 
     /// Create an Arc-wrapped indexer for a registered chain
@@ -107,9 +110,8 @@ impl IndexerPluginRegistry {
         config: ChainConfig,
         rpc_manager: RpcManager,
     ) -> Option<Arc<dyn ChainIndexer>> {
-        self.factories
-            .get(chain_id)
-            .map(|factory| Arc::from(factory(config, rpc_manager)))
+        self.create_indexer(chain_id, config, rpc_manager)
+            .map(Arc::from)
     }
 
     /// Get all registered chain IDs
@@ -302,7 +304,7 @@ impl Default for IndexerPluginRegistryBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain_indexer::{AddressIndexingResult, ChainResult};
+    use crate::chain_indexer::{AddressIndexingResult, ChainResult, LegacyChainConnectorAdapter};
     use async_trait::async_trait;
     use tuppira_shared::{
         CommitmentScheme, CsvContract, EnhancedSanadRecord, EnhancedSealRecord,
@@ -412,5 +414,30 @@ mod tests {
         assert!(registry.unregister("test"));
         assert!(!registry.is_registered("test"));
         assert!(!registry.unregister("test")); // Already removed
+    }
+
+    #[tokio::test]
+    async fn legacy_chain_adapter_preserves_indexer_behavior() -> ChainResult<()> {
+        let adapter = LegacyChainConnectorAdapter::new(Box::new(MockIndexer));
+        adapter.initialize().await?;
+        assert_eq!(adapter.chain_id(), "test");
+        assert_eq!(adapter.chain_name(), "Test Chain");
+        assert_eq!(adapter.get_chain_tip().await?, 100);
+        assert_eq!(adapter.get_latest_synced_block().await?, 0);
+        let result = adapter.process_block(42).await?;
+        assert_eq!(result.block, 42);
+        assert_eq!(result.sanads_count, 0);
+        assert_eq!(result.seals_count, 0);
+        assert_eq!(result.transfers_count, 0);
+        assert_eq!(result.contracts_count, 0);
+        assert_eq!(
+            adapter.detect_inclusion_proof_type(),
+            InclusionProofType::Merkle
+        );
+        assert_eq!(
+            adapter.detect_finality_proof_type(),
+            FinalityProofType::ConfirmationDepth
+        );
+        Ok(())
     }
 }
