@@ -10,6 +10,7 @@ pub mod ethereum;
 pub mod indexer_plugin;
 pub mod manifest;
 pub mod metrics;
+pub mod piteka_feed;
 pub mod rpc_manager;
 pub mod solana;
 pub mod sui;
@@ -25,6 +26,10 @@ pub use connector::{
     authenticate_and_normalize,
 };
 pub use indexer_plugin::{IndexerPluginRegistry, IndexerPluginRegistryBuilder};
+pub use piteka_feed::{
+    HttpPitekaFeedTransport, PitekaEvidenceFeedConnector, PitekaFeedConfig, PitekaFeedPage,
+    PitekaFeedTransport, SignedPitekaExport,
+};
 pub use rpc_manager::{AuthType, RpcConfig, RpcEndpoint, RpcManager, RpcType, load_rpc_config};
 pub use sync::SyncCoordinator;
 pub use wallet_bridge::{WalletIndexerBridge, WalletIndexerBridgeConfig};
