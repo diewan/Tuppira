@@ -31,3 +31,5 @@ serde_json.workspace = true
 clap.workspace = true
 prometheus.workspace = true
 reqwest.workspace = true
+sha2.workspace = true
+hex.workspace = true

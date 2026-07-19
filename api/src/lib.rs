@@ -7,3 +7,4 @@ pub mod rest;
 pub mod server;
 
 pub use server::ApiServer;
+pub mod access;

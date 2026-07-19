@@ -2,12 +2,12 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
 use serde::{Deserialize, Serialize};
 
 use tuppira_storage::repositories::{
-    SanadsRepository, SealsRepository, StatsRepository, TransfersRepository,
+    ObservationRepository, SanadsRepository, SealsRepository, StatsRepository, TransfersRepository,
 };
 
 use std::str::FromStr;
@@ -80,6 +80,66 @@ pub async fn wallet_feed(
     Json(ApiResponse::from(
         feed.since(query.after_sequence.unwrap_or(0)).await,
     ))
+}
+
+/// GET /api/v1/observations/:id/lineage. Raw bytes, custody locators, and raw
+/// payload digests are intentionally absent from this ordinary read model.
+pub async fn observation_lineage(
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    State((_, pool, _, _)): State<AppState>,
+) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, (StatusCode, Json<ErrorResponse>)> {
+    let access = crate::access::authenticate(&headers).map_err(auth_error)?;
+    let records = ObservationRepository::new(pool)
+        .visible_lineage(&id, &access.tenant_id)
+        .await
+        .map_err(tuppira_error)?;
+    let data: Vec<serde_json::Value> = records.into_iter().map(|record| serde_json::json!({
+        "observation_id": record.observation_id, "source_id": record.source_id,
+        "source_event_id": record.source_event_id, "source_event_type": record.source_event_type,
+        "subject_refs": record.subject_refs, "asserted_event_time": record.asserted_event_time,
+        "observed_at": record.observed_at, "normalized_profile_id": record.normalized_profile_id,
+        "normalized_profile_version": record.normalized_profile_version,
+        "normalized_payload_digest": hex::encode(record.normalized_payload_digest),
+        "authenticity_material_refs": record.authenticity_material_refs,
+        "collection_run_id": record.collection_run_id, "supersedes": record.supersedes,
+        "retraction_status": format!("{:?}", record.retraction_status).to_lowercase(),
+        "visibility_scope": match record.tenant_visibility { tuppira_shared::TenantVisibility::Public => "public", tuppira_shared::TenantVisibility::Tenant { .. } => "tenant" }
+    })).collect();
+    Ok(Json(ApiResponse::from(data)))
+}
+
+/// GET /api/v1/observation-sources/health.
+pub async fn observation_source_health(
+    headers: HeaderMap,
+    State((_, pool, _, _)): State<AppState>,
+) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, (StatusCode, Json<ErrorResponse>)> {
+    let _access = crate::access::authenticate(&headers).map_err(auth_error)?;
+    let records = ObservationRepository::new(pool)
+        .source_health()
+        .await
+        .map_err(tuppira_error)?;
+    Ok(Json(ApiResponse::from(records.into_iter().map(|record| serde_json::json!({
+        "source_id": record.source_id, "connector_kind": record.connector_kind,
+        "display_name": record.display_name, "last_run_started_at": record.last_run_started_at,
+        "last_run_completed_at": record.last_run_completed_at,
+        "cursor_observed_at": record.cursor_observed_at
+    })).collect::<Vec<_>>())))
+}
+
+fn auth_error(status: StatusCode) -> (StatusCode, Json<ErrorResponse>) {
+    let message = if status == StatusCode::SERVICE_UNAVAILABLE {
+        "observation authentication is not configured"
+    } else {
+        "observation authentication failed"
+    };
+    (
+        status,
+        Json(ErrorResponse {
+            error: message.into(),
+            success: false,
+        }),
+    )
 }
 
 // ---------------------------------------------------------------------------

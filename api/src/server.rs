@@ -153,10 +153,13 @@ async fn graphql_playground() -> impl IntoResponse {
 /// GraphQL request handler.
 async fn graphql_handler(
     State((schema, _, _, _)): State<ApiState>,
+    headers: axum::http::HeaderMap,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
-    let inner_req = req.into_inner();
-    let request = inner_req;
+    let mut request = req.into_inner();
+    if let Ok(access) = crate::access::authenticate(&headers) {
+        request = request.data(access);
+    }
     let response = schema.execute(request).await;
     GraphQLResponse::from(response)
 }

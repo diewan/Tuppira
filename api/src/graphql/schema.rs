@@ -9,8 +9,8 @@ use std::str::FromStr;
 
 use tuppira_shared::{CommitmentScheme, InclusionProofType};
 use tuppira_storage::repositories::{
-    AdvancedProofRepository, ContractsRepository, SanadsRepository, SealsRepository,
-    StatsRepository, TransfersRepository,
+    AdvancedProofRepository, ContractsRepository, ObservationRepository, SanadsRepository,
+    SealsRepository, StatsRepository, TransfersRepository,
 };
 
 use super::types::*;
@@ -27,6 +27,37 @@ pub struct Query;
 
 #[Object]
 impl Query {
+    async fn observation_lineage(
+        &self,
+        ctx: &Context<'_>,
+        observation_id: String,
+    ) -> Result<Vec<ObservationGql>> {
+        let gql_ctx = ctx
+            .data::<GraphqlContext>()
+            .map_err(|_| Error::new("API context unavailable"))?;
+        let access = ctx
+            .data::<crate::access::ObservationAccess>()
+            .map_err(|_| Error::new("observation authentication required"))?;
+        ObservationRepository::new(gql_ctx.pool.clone())
+            .visible_lineage(&observation_id, &access.tenant_id)
+            .await
+            .map(|records| records.into_iter().map(Into::into).collect())
+            .map_err(|error| Error::new(error.to_string()))
+    }
+
+    async fn observation_source_health(&self, ctx: &Context<'_>) -> Result<Vec<SourceHealthGql>> {
+        let gql_ctx = ctx
+            .data::<GraphqlContext>()
+            .map_err(|_| Error::new("API context unavailable"))?;
+        let _access = ctx
+            .data::<crate::access::ObservationAccess>()
+            .map_err(|_| Error::new("observation authentication required"))?;
+        ObservationRepository::new(gql_ctx.pool.clone())
+            .source_health()
+            .await
+            .map(|records| records.into_iter().map(Into::into).collect())
+            .map_err(|error| Error::new(error.to_string()))
+    }
     /// Ordered, untrusted indexer observations for wallet discovery.  These
     /// reports never constitute cryptographic verification or mutation authority.
     async fn wallet_feed(
@@ -595,7 +626,7 @@ pub fn create_schema(
 
 #[cfg(test)]
 mod tests {
-    use super::{Mutation, Query, Subscription};
+    use super::{GraphqlContext, Mutation, Query, Subscription, create_schema};
     use async_graphql::Schema;
 
     #[tokio::test]
@@ -614,5 +645,28 @@ mod tests {
                     .contains("does not expose an indexer control plane")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn observation_queries_require_authentication_and_hide_raw_fields() {
+        let pool = tuppira_storage::init_pool("sqlite::memory:", 1).await;
+        assert!(pool.is_ok());
+        let Ok(pool) = pool else {
+            return;
+        };
+        let feed = crate::feed::WalletFeedHub::from_pool(pool.clone()).await;
+        assert!(feed.is_ok());
+        let Ok(feed) = feed else {
+            return;
+        };
+        let schema = create_schema(GraphqlContext { pool, feed }, true);
+        let denied = schema
+            .execute("{ observationSourceHealth { sourceId } }")
+            .await;
+        assert_eq!(denied.errors.len(), 1);
+        assert!(denied.errors[0].message.contains("authentication required"));
+        let schema_text = schema.sdl();
+        assert!(!schema_text.contains("rawPayload"));
+        assert!(!schema_text.contains("custodyLocator"));
     }
 }

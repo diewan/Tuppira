@@ -1,5 +1,13 @@
 # Tuppira
 
+Tenant-scoped observation GraphQL/REST reads require both
+`X-Tuppira-Tenant-Id` and `Authorization: Bearer <token>`. Configure credentials
+with `TUPPIRA_OBSERVATION_API_KEYS` as a comma-separated list of
+`tenant-id=opaque-token` pairs. Keep this value in the deployment secret store;
+when it is absent, observation endpoints fail closed with HTTP 503. Ordinary
+observation responses expose normalized projections and lineage only—never raw
+bytes, custody locators, or raw-payload digests.
+
 Tuppira is the **indexer for the Parwana protocol** — built entirely in Rust.
 
 It is deliberately *not* an all-in-one block explorer. Tuppira traces only the

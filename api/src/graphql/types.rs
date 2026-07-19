@@ -1,5 +1,74 @@
 /// GraphQL type mappings and input types for the Tuppira API.
 use async_graphql::*;
+
+#[derive(SimpleObject, Clone)]
+pub struct ObservationGql {
+    pub observation_id: String,
+    pub source_id: String,
+    pub source_event_id: String,
+    pub source_event_type: String,
+    pub subject_refs: Vec<String>,
+    pub asserted_event_time: Option<i64>,
+    pub observed_at: i64,
+    pub normalized_profile_id: String,
+    pub normalized_profile_version: i32,
+    pub normalized_payload_digest: String,
+    pub authenticity_material_refs: Vec<String>,
+    pub collection_run_id: String,
+    pub supersedes: Option<String>,
+    pub retraction_status: String,
+    pub visibility_scope: String,
+}
+
+impl From<tuppira_shared::ObservationRecord> for ObservationGql {
+    fn from(value: tuppira_shared::ObservationRecord) -> Self {
+        let visibility_scope = match value.tenant_visibility {
+            tuppira_shared::TenantVisibility::Public => "public",
+            tuppira_shared::TenantVisibility::Tenant { .. } => "tenant",
+        }
+        .to_string();
+        Self {
+            observation_id: value.observation_id,
+            source_id: value.source_id,
+            source_event_id: value.source_event_id,
+            source_event_type: value.source_event_type,
+            subject_refs: value.subject_refs,
+            asserted_event_time: value.asserted_event_time.map(|v| v as i64),
+            observed_at: value.observed_at as i64,
+            normalized_profile_id: value.normalized_profile_id,
+            normalized_profile_version: i32::from(value.normalized_profile_version),
+            normalized_payload_digest: hex::encode(value.normalized_payload_digest),
+            authenticity_material_refs: value.authenticity_material_refs,
+            collection_run_id: value.collection_run_id,
+            supersedes: value.supersedes,
+            retraction_status: format!("{:?}", value.retraction_status).to_lowercase(),
+            visibility_scope,
+        }
+    }
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct SourceHealthGql {
+    pub source_id: String,
+    pub connector_kind: String,
+    pub display_name: String,
+    pub last_run_started_at: Option<i64>,
+    pub last_run_completed_at: Option<i64>,
+    pub cursor_observed_at: Option<i64>,
+}
+
+impl From<tuppira_storage::repositories::observations::SourceHealthRecord> for SourceHealthGql {
+    fn from(value: tuppira_storage::repositories::observations::SourceHealthRecord) -> Self {
+        Self {
+            source_id: value.source_id,
+            connector_kind: value.connector_kind,
+            display_name: value.display_name,
+            last_run_started_at: value.last_run_started_at.map(|v| v as i64),
+            last_run_completed_at: value.last_run_completed_at.map(|v| v as i64),
+            cursor_observed_at: value.cursor_observed_at.map(|v| v as i64),
+        }
+    }
+}
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 

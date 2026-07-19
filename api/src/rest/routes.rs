@@ -32,6 +32,14 @@ pub fn rest_routes() -> Router<AppState> {
         // Chains
         .route("/chains", get(handlers::list_chains))
         .route("/wallet/feed", get(handlers::wallet_feed))
+        .route(
+            "/observations/{id}/lineage",
+            get(handlers::observation_lineage),
+        )
+        .route(
+            "/observation-sources/health",
+            get(handlers::observation_source_health),
+        )
         // Enhanced sanads with commitment metadata
         .route("/sanads/enhanced", get(handlers::list_enhanced_sanads))
         .route("/sanads/enhanced/{id}", get(handlers::get_enhanced_sanad))

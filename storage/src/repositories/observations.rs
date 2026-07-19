@@ -13,6 +13,16 @@ pub struct ObservationRepository {
     pool: SqlitePool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceHealthRecord {
+    pub source_id: String,
+    pub connector_kind: String,
+    pub display_name: String,
+    pub last_run_started_at: Option<u64>,
+    pub last_run_completed_at: Option<u64>,
+    pub cursor_observed_at: Option<u64>,
+}
+
 impl ObservationRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
@@ -108,6 +118,89 @@ impl ObservationRepository {
         Ok(rows)
     }
 
+    /// Return an observation only when it is public or belongs to the caller's tenant.
+    pub async fn get_visible_observation(
+        &self,
+        observation_id: &str,
+        tenant_id: &str,
+    ) -> Result<ObservationRecord> {
+        ensure_text(tenant_id, "tenant_id")?;
+        let observation = self.get_observation(observation_id).await?;
+        if matches!(&observation.tenant_visibility, TenantVisibility::Tenant { tenant_id: owner } if owner != tenant_id)
+        {
+            return Err(TuppiraError::NotFound {
+                entity_type: "observation".into(),
+                id: observation_id.into(),
+            });
+        }
+        Ok(observation)
+    }
+
+    /// Ordered correction ancestry, filtered at every recursive step so a
+    /// malformed cross-tenant lineage can never disclose an identifier.
+    pub async fn visible_lineage(
+        &self,
+        observation_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<ObservationRecord>> {
+        ensure_text(observation_id, "observation_id")?;
+        ensure_text(tenant_id, "tenant_id")?;
+        let ids = sqlx::query_scalar::<_, String>(
+            "WITH RECURSIVE lineage(id) AS (\
+             SELECT observation_id FROM observations WHERE observation_id = ? AND (visibility_scope = 'public' OR tenant_id = ?) \
+             UNION ALL \
+             SELECT prior.observation_id FROM supersessions s JOIN lineage l ON s.superseding_observation_id = l.id \
+             JOIN observations prior ON prior.observation_id = s.superseded_observation_id \
+             WHERE prior.visibility_scope = 'public' OR prior.tenant_id = ?) SELECT id FROM lineage",
+        )
+        .bind(observation_id)
+        .bind(tenant_id)
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+        if ids.is_empty() {
+            return Err(TuppiraError::NotFound {
+                entity_type: "observation".into(),
+                id: observation_id.into(),
+            });
+        }
+        let mut records = Vec::with_capacity(ids.len());
+        for id in ids {
+            records.push(self.get_visible_observation(&id, tenant_id).await?);
+        }
+        Ok(records)
+    }
+
+    pub async fn source_health(&self) -> Result<Vec<SourceHealthRecord>> {
+        let rows = sqlx::query(
+            "SELECT s.source_id, s.connector_kind, s.display_name, \
+             (SELECT started_at FROM collection_runs r WHERE r.source_id = s.source_id ORDER BY started_at DESC LIMIT 1) last_run_started_at, \
+             (SELECT completed_at FROM collection_runs r WHERE r.source_id = s.source_id ORDER BY started_at DESC LIMIT 1) last_run_completed_at, \
+             c.observed_at cursor_observed_at FROM observation_sources s LEFT JOIN sync_cursors c ON c.source_id = s.source_id ORDER BY s.source_id",
+        ).fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(SourceHealthRecord {
+                    source_id: row.try_get("source_id")?,
+                    connector_kind: row.try_get("connector_kind")?,
+                    display_name: row.try_get("display_name")?,
+                    last_run_started_at: optional_u64(
+                        row.try_get("last_run_started_at")?,
+                        "last_run_started_at",
+                    )?,
+                    last_run_completed_at: optional_u64(
+                        row.try_get("last_run_completed_at")?,
+                        "last_run_completed_at",
+                    )?,
+                    cursor_observed_at: optional_u64(
+                        row.try_get("cursor_observed_at")?,
+                        "cursor_observed_at",
+                    )?,
+                })
+            })
+            .collect()
+    }
+
     pub async fn cursor(&self, source_id: &str) -> Result<SyncCursorRecord> {
         let row = sqlx::query("SELECT schema_version, source_id, cursor_version, cursor, observed_at FROM sync_cursors WHERE source_id = ?")
             .bind(source_id).fetch_optional(&self.pool).await?
@@ -120,6 +213,10 @@ impl ObservationRepository {
             observed_at: to_u64(row.try_get::<i64, _>("observed_at")?, "observed_at")?,
         })
     }
+}
+
+fn optional_u64(value: Option<i64>, field: &str) -> Result<Option<u64>> {
+    value.map(|value| to_u64(value, field)).transpose()
 }
 
 async fn insert_observation(
@@ -379,6 +476,55 @@ mod tests {
             repository.cursor("source:piteka").await.ok(),
             Some(cursor(13))
         );
+    }
+
+    #[tokio::test]
+    async fn visibility_hides_cross_tenant_records_and_lineage() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        assert!(
+            repository
+                .append_observation(&observation("obs:1", 1, None), &cursor(12))
+                .await
+                .is_ok()
+        );
+        assert!(
+            repository
+                .get_visible_observation("obs:1", "tenant:acme")
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            repository
+                .get_visible_observation("obs:1", "tenant:other")
+                .await,
+            Err(TuppiraError::NotFound { .. })
+        ));
+        assert!(matches!(
+            repository.visible_lineage("obs:1", "tenant:other").await,
+            Err(TuppiraError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn source_health_reports_runs_and_cursor_without_raw_descriptors() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        assert!(
+            repository
+                .append_observation(&observation("obs:1", 1, None), &cursor(12))
+                .await
+                .is_ok()
+        );
+        let health = repository.source_health().await;
+        assert!(health.is_ok());
+        let health = health.unwrap_or_default();
+        assert_eq!(health.len(), 1);
+        assert_eq!(health[0].source_id, "source:piteka");
+        assert_eq!(health[0].last_run_completed_at, Some(11));
+        assert_eq!(health[0].cursor_observed_at, Some(12));
     }
 
     #[tokio::test]
