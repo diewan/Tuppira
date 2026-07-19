@@ -12,6 +12,7 @@ use tuppira_shared::{TuppiraError, Result};
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
     (2, include_str!("../migrations/0002_wallet_feed.sql")),
+    (3, include_str!("../migrations/0003_observation_plane.sql")),
 ];
 
 /// Initialize the database connection pool and apply schema.
@@ -104,7 +105,20 @@ mod tests {
             sqlx::query_scalar("SELECT COUNT(*) FROM _tuppira_migrations")
                 .fetch_one(&pool)
                 .await;
-        assert!(matches!(count, Ok(2)));
+        assert!(matches!(count, Ok(3)));
+        let observation_tables: Result<i64, sqlx::Error> = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('observations', 'raw_payload_descriptors', 'collection_runs', 'sync_cursors', 'supersessions')",
+        ).fetch_one(&pool).await;
+        assert!(matches!(observation_tables, Ok(5)));
+
+        // Re-opening the same pool proves the migration ledger is idempotent.
+        let reapplied = super::apply_migrations(&pool).await;
+        assert!(reapplied.is_ok());
+        let count: Result<i64, sqlx::Error> =
+            sqlx::query_scalar("SELECT COUNT(*) FROM _tuppira_migrations")
+                .fetch_one(&pool)
+                .await;
+        assert!(matches!(count, Ok(3)));
     }
 
     #[tokio::test]
