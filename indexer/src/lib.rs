@@ -8,6 +8,7 @@ pub mod chain_indexer;
 pub mod connector;
 pub mod ethereum;
 pub mod indexer_plugin;
+pub mod ingest;
 pub mod manifest;
 pub mod metrics;
 pub mod piteka_feed;
@@ -26,6 +27,7 @@ pub use connector::{
     authenticate_and_normalize,
 };
 pub use indexer_plugin::{IndexerPluginRegistry, IndexerPluginRegistryBuilder};
+pub use ingest::{IngestConfig, IngestSummary, ingest_piteka};
 pub use piteka_feed::{
     HttpPitekaFeedTransport, PitekaEvidenceFeedConnector, PitekaFeedConfig, PitekaFeedPage,
     PitekaFeedTransport, SignedPitekaExport,

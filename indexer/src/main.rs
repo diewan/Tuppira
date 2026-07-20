@@ -51,6 +51,14 @@ enum Commands {
         /// Optional: specific chain to reset (resets all if omitted)
         chain: Option<String>,
     },
+    /// Ingest Piteka's signed evidence-export feed into the observation plane.
+    ///
+    /// Configuration is read from the environment:
+    ///   PITEKA_FEED_ENDPOINT, PITEKA_FEED_BEARER_TOKEN, PITEKA_FEED_TENANT_ID,
+    ///   PITEKA_FEED_SOURCE_ID, PITEKA_FEED_SIGNING_KEY_ID,
+    ///   PITEKA_FEED_VERIFYING_KEY, PITEKA_FEED_RETENTION_CLASS_ID,
+    ///   PITEKA_FEED_COLLECTION_RUN_ID (optional).
+    IngestPiteka,
 }
 
 #[tokio::main]
@@ -75,6 +83,12 @@ async fn main() -> Result<()> {
     // Initialize database
     let pool = init_pool(&config.database.url, config.database.max_connections).await?;
 
+    // The Piteka evidence-feed ingestion is source-neutral and does not need the
+    // chain indexer wired up, so handle it before constructing the Indexer.
+    if let Commands::IngestPiteka = cli.command {
+        return run_ingest_piteka(pool).await;
+    }
+
     // Create indexer
     let indexer = Indexer::new(config, pool).await?;
 
@@ -84,7 +98,52 @@ async fn main() -> Result<()> {
         Commands::Sync { chain, from_block } => run_sync(&indexer, &chain, from_block).await,
         Commands::Reindex { chain, from_block } => run_reindex(&indexer, &chain, from_block).await,
         Commands::Reset { chain } => run_reset(&indexer, chain).await,
+        Commands::IngestPiteka => unreachable!("handled before indexer construction"),
     }
+}
+
+/// Runs one pass of Piteka evidence-feed ingestion using environment config.
+async fn run_ingest_piteka(pool: sqlx::SqlitePool) -> Result<()> {
+    use tuppira_shared::TuppiraError;
+
+    fn required(name: &str) -> Result<String> {
+        std::env::var(name)
+            .map_err(|_| TuppiraError::Internal(format!("{name} is required for ingest-piteka")))
+    }
+
+    let collection_run_id = std::env::var("PITEKA_FEED_COLLECTION_RUN_ID").unwrap_or_else(|_| {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("piteka-ingest-{stamp}")
+    });
+
+    let config = tuppira_indexer::IngestConfig {
+        endpoint: required("PITEKA_FEED_ENDPOINT")?,
+        bearer_token: required("PITEKA_FEED_BEARER_TOKEN")?,
+        tenant_id: required("PITEKA_FEED_TENANT_ID")?,
+        source_id: required("PITEKA_FEED_SOURCE_ID")?,
+        signing_key_id: required("PITEKA_FEED_SIGNING_KEY_ID")?,
+        verifying_key_hex: required("PITEKA_FEED_VERIFYING_KEY")?,
+        retention_class_id: std::env::var("PITEKA_FEED_RETENTION_CLASS_ID")
+            .unwrap_or_else(|_| "tenant-evidence".to_string()),
+        collection_run_id,
+    };
+
+    let summary = tuppira_indexer::ingest_piteka(pool, config)
+        .await
+        .map_err(TuppiraError::Internal)?;
+
+    println!("Piteka evidence-feed ingestion");
+    println!("==============================");
+    println!("Authenticated exports: {}", summary.authenticated);
+    println!("Persisted observations: {}", summary.persisted);
+    println!("Duplicate (already ingested): {}", summary.duplicates);
+    for observation_id in &summary.observation_ids {
+        println!("  observation: {observation_id}");
+    }
+    Ok(())
 }
 
 async fn run_start(indexer: &Indexer) -> Result<()> {
