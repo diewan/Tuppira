@@ -32,6 +32,7 @@ pub fn rest_routes() -> Router<AppState> {
         // Chains
         .route("/chains", get(handlers::list_chains))
         .route("/wallet/feed", get(handlers::wallet_feed))
+        .route("/observations", get(handlers::observation_list))
         .route(
             "/observations/{id}/lineage",
             get(handlers::observation_lineage),

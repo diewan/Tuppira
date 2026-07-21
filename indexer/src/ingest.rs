@@ -44,6 +44,9 @@ pub struct IngestSummary {
     pub authenticated: u64,
     pub persisted: u64,
     pub duplicates: u64,
+    /// Exports the connector rejected (e.g. incomplete evidence). Skipping keeps
+    /// the live feed flowing; one malformed export never halts the pipeline.
+    pub skipped: u64,
     pub observation_ids: Vec<String>,
 }
 
@@ -129,9 +132,18 @@ pub async fn ingest_piteka(pool: SqlitePool, config: IngestConfig) -> Result<Ing
         }
 
         for raw in &batch.events {
-            let candidate = authenticate_and_normalize(&connector, raw, 1)
-                .await
-                .map_err(|error| format!("authenticate/normalize failed: {error:?}"))?;
+            // A single export that fails authentication or normalization (for
+            // example a receipt with no disclosed intent binding) is skipped,
+            // not fatal: the connector enforces evidence completeness, and the
+            // live feed must keep flowing past incomplete records.
+            let candidate = match authenticate_and_normalize(&connector, raw, 1).await {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    eprintln!("ingest: skipping export: authenticate/normalize failed: {error:?}");
+                    summary.skipped += 1;
+                    continue;
+                }
+            };
             summary.authenticated += 1;
 
             if let Some(descriptor) = &candidate.raw_payload {

@@ -58,7 +58,12 @@ enum Commands {
     ///   PITEKA_FEED_SOURCE_ID, PITEKA_FEED_SIGNING_KEY_ID,
     ///   PITEKA_FEED_VERIFYING_KEY, PITEKA_FEED_RETENTION_CLASS_ID,
     ///   PITEKA_FEED_COLLECTION_RUN_ID (optional).
-    IngestPiteka,
+    IngestPiteka {
+        /// Re-run continuously every N seconds so new receipts are ingested as
+        /// they appear (live). Omit for a single one-shot pass.
+        #[arg(long, value_name = "SECONDS")]
+        watch: Option<u64>,
+    },
 }
 
 #[tokio::main]
@@ -85,8 +90,8 @@ async fn main() -> Result<()> {
 
     // The Piteka evidence-feed ingestion is source-neutral and does not need the
     // chain indexer wired up, so handle it before constructing the Indexer.
-    if let Commands::IngestPiteka = cli.command {
-        return run_ingest_piteka(pool).await;
+    if let Commands::IngestPiteka { watch } = cli.command {
+        return run_ingest_piteka(pool, watch).await;
     }
 
     // Create indexer
@@ -98,12 +103,12 @@ async fn main() -> Result<()> {
         Commands::Sync { chain, from_block } => run_sync(&indexer, &chain, from_block).await,
         Commands::Reindex { chain, from_block } => run_reindex(&indexer, &chain, from_block).await,
         Commands::Reset { chain } => run_reset(&indexer, chain).await,
-        Commands::IngestPiteka => unreachable!("handled before indexer construction"),
+        Commands::IngestPiteka { .. } => unreachable!("handled before indexer construction"),
     }
 }
 
 /// Runs one pass of Piteka evidence-feed ingestion using environment config.
-async fn run_ingest_piteka(pool: sqlx::SqlitePool) -> Result<()> {
+async fn run_ingest_piteka(pool: sqlx::SqlitePool, watch: Option<u64>) -> Result<()> {
     use tuppira_shared::TuppiraError;
 
     fn required(name: &str) -> Result<String> {
@@ -111,15 +116,20 @@ async fn run_ingest_piteka(pool: sqlx::SqlitePool) -> Result<()> {
             .map_err(|_| TuppiraError::Internal(format!("{name} is required for ingest-piteka")))
     }
 
-    let collection_run_id = std::env::var("PITEKA_FEED_COLLECTION_RUN_ID").unwrap_or_else(|_| {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        format!("piteka-ingest-{stamp}")
-    });
+    // Fixed run id (if provided) is reused every pass; otherwise each pass gets
+    // a fresh timestamped run id so source-health reflects the latest sweep.
+    let fixed_run_id = std::env::var("PITEKA_FEED_COLLECTION_RUN_ID").ok();
+    let make_run_id = |fixed: &Option<String>| {
+        fixed.clone().unwrap_or_else(|| {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("piteka-ingest-{stamp}")
+        })
+    };
 
-    let config = tuppira_indexer::IngestConfig {
+    let base = tuppira_indexer::IngestConfig {
         endpoint: required("PITEKA_FEED_ENDPOINT")?,
         bearer_token: required("PITEKA_FEED_BEARER_TOKEN")?,
         tenant_id: required("PITEKA_FEED_TENANT_ID")?,
@@ -128,20 +138,56 @@ async fn run_ingest_piteka(pool: sqlx::SqlitePool) -> Result<()> {
         verifying_key_hex: required("PITEKA_FEED_VERIFYING_KEY")?,
         retention_class_id: std::env::var("PITEKA_FEED_RETENTION_CLASS_ID")
             .unwrap_or_else(|_| "tenant-evidence".to_string()),
-        collection_run_id,
+        collection_run_id: String::new(),
     };
 
-    let summary = tuppira_indexer::ingest_piteka(pool, config)
-        .await
-        .map_err(TuppiraError::Internal)?;
+    let run_once = |run_id: String| {
+        let mut config = base.clone();
+        config.collection_run_id = run_id;
+        let pool = pool.clone();
+        async move {
+            tuppira_indexer::ingest_piteka(pool, config)
+                .await
+                .map_err(TuppiraError::Internal)
+        }
+    };
 
-    println!("Piteka evidence-feed ingestion");
-    println!("==============================");
-    println!("Authenticated exports: {}", summary.authenticated);
-    println!("Persisted observations: {}", summary.persisted);
-    println!("Duplicate (already ingested): {}", summary.duplicates);
-    for observation_id in &summary.observation_ids {
-        println!("  observation: {observation_id}");
+    match watch {
+        None => {
+            let summary = run_once(make_run_id(&fixed_run_id)).await?;
+            println!("Piteka evidence-feed ingestion");
+            println!("==============================");
+            println!("Authenticated exports: {}", summary.authenticated);
+            println!("Persisted observations: {}", summary.persisted);
+            println!("Duplicate (already ingested): {}", summary.duplicates);
+            println!("Skipped (incomplete evidence): {}", summary.skipped);
+            for observation_id in &summary.observation_ids {
+                println!("  observation: {observation_id}");
+            }
+        }
+        Some(seconds) => {
+            let interval = std::time::Duration::from_secs(seconds.max(1));
+            println!("Piteka evidence-feed ingestion (watch: every {seconds}s) — Ctrl-C to stop");
+            loop {
+                match run_once(make_run_id(&fixed_run_id)).await {
+                    Ok(summary) => {
+                        // Only announce a pass that actually changed the store,
+                        // so quiet polling stays quiet.
+                        if summary.persisted > 0 {
+                            println!(
+                                "[ingest] +{} new, {} dup, {} skipped ({} total visible this pass)",
+                                summary.persisted,
+                                summary.duplicates,
+                                summary.skipped,
+                                summary.observation_ids.len()
+                            );
+                        }
+                    }
+                    Err(error) => eprintln!("[ingest] pass failed: {error}"),
+                }
+                tokio::time::sleep(interval).await;
+            }
+        }
     }
     Ok(())
 }

@@ -172,6 +172,34 @@ impl ObservationRepository {
         Ok(records)
     }
 
+    /// The most recent tenant-visible observations, newest first.
+    ///
+    /// This is the live discovery feed the Hemion explorer polls. Only public
+    /// observations and those owned by the caller's tenant are returned; the
+    /// full record (subjects, digests) is assembled per row via the same
+    /// visibility-checked path as single-observation reads.
+    pub async fn list_visible_observations(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ObservationRecord>> {
+        ensure_text(tenant_id, "tenant_id")?;
+        let ids = sqlx::query_scalar::<_, String>(
+            "SELECT observation_id FROM observations \
+             WHERE visibility_scope = 'public' OR tenant_id = ? \
+             ORDER BY observed_at DESC, observation_id DESC LIMIT ?",
+        )
+        .bind(tenant_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut records = Vec::with_capacity(ids.len());
+        for id in ids {
+            records.push(self.get_visible_observation(&id, tenant_id).await?);
+        }
+        Ok(records)
+    }
+
     pub async fn source_health(&self) -> Result<Vec<SourceHealthRecord>> {
         let rows = sqlx::query(
             "SELECT s.source_id, s.connector_kind, s.display_name, \

@@ -5,6 +5,8 @@ max_connections = 10
 [api]
 host = "0.0.0.0"
 port = 8081
+# Browser origins permitted to call the read API (Hemion web console).
+cors_origins = ["http://127.0.0.1:8181", "http://localhost:8181"]
 
 [indexer]
 concurrency = 4

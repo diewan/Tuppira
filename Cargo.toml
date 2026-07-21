@@ -10,10 +10,10 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
-async-graphql = "5.0"
-async-graphql-axum = "=5.0.6"
+async-graphql = "7"
+async-graphql-axum = "7"
 async-trait = "0.1"
-axum = "0.6"
+axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13"
@@ -31,8 +31,8 @@ sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runti
 thiserror = "1.0"
 tokio = { version = "1", features = ["rt", "macros", "time", "rt-multi-thread", "sync", "signal"] }
 toml = "0.8"
-tower = "0.4"
-tower-http = { version = "0.4", features = ["fs", "trace", "cors"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.6", features = ["v4", "serde", "js"] }

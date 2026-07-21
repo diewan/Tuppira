@@ -4,9 +4,12 @@
 use async_graphql::http::{GraphQLPlaygroundConfig, playground_source};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse, GraphQLSubscription};
 use axum::{
-    Router, Server,
+    Router,
     extract::{DefaultBodyLimit, State},
-    http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
+    http::{
+        HeaderName, HeaderValue, Method, StatusCode,
+        header::{AUTHORIZATION, CONTENT_TYPE},
+    },
     response::{Html, IntoResponse},
     routing::get,
 };
@@ -110,8 +113,10 @@ impl ApiServer {
         })?;
 
         tracing::info!(addr = %addr, "API server started");
-        Server::bind(&addr)
-            .serve(app.into_make_service())
+        let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+            tuppira_shared::TuppiraError::Internal(format!("Bind error on {addr}: {e}"))
+        })?;
+        axum::serve(listener, app.into_make_service())
             .await
             .map_err(|e| tuppira_shared::TuppiraError::Internal(format!("Server error: {}", e)))?;
 
@@ -137,7 +142,11 @@ fn cors_layer(origins: &[String]) -> Result<CorsLayer> {
 
     let layer = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
-        .allow_headers([CONTENT_TYPE]);
+        .allow_headers([
+            CONTENT_TYPE,
+            AUTHORIZATION,
+            HeaderName::from_static("x-tuppira-tenant-id"),
+        ]);
     if allowed.is_empty() {
         Ok(layer)
     } else {

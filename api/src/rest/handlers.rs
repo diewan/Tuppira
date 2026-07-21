@@ -127,6 +127,47 @@ pub async fn observation_source_health(
     })).collect::<Vec<_>>())))
 }
 
+/// Query parameters for the observation feed.
+#[derive(Deserialize)]
+pub struct ListObservationsQuery {
+    /// Maximum rows to return (default 50, clamped to [1, 500]).
+    pub limit: Option<i64>,
+}
+
+/// GET /api/v1/observations. The live discovery feed: the most recent
+/// tenant-visible observations, newest first. Hemion polls this to stream new
+/// activity. Discovery is not verification — validity is recomputed locally.
+pub async fn observation_list(
+    headers: HeaderMap,
+    Query(query): Query<ListObservationsQuery>,
+    State((_, pool, _, _)): State<AppState>,
+) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, (StatusCode, Json<ErrorResponse>)> {
+    let access = crate::access::authenticate(&headers).map_err(auth_error)?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 500);
+    let records = ObservationRepository::new(pool)
+        .list_visible_observations(&access.tenant_id, limit)
+        .await
+        .map_err(tuppira_error)?;
+    let data: Vec<serde_json::Value> = records
+        .into_iter()
+        .map(|record| {
+            serde_json::json!({
+                "observation_id": record.observation_id, "source_id": record.source_id,
+                "source_event_id": record.source_event_id, "source_event_type": record.source_event_type,
+                "subject_refs": record.subject_refs, "asserted_event_time": record.asserted_event_time,
+                "observed_at": record.observed_at, "normalized_profile_id": record.normalized_profile_id,
+                "normalized_profile_version": record.normalized_profile_version,
+                "normalized_payload_digest": hex::encode(record.normalized_payload_digest),
+                "authenticity_material_refs": record.authenticity_material_refs,
+                "collection_run_id": record.collection_run_id, "supersedes": record.supersedes,
+                "retraction_status": format!("{:?}", record.retraction_status).to_lowercase(),
+                "visibility_scope": match record.tenant_visibility { tuppira_shared::TenantVisibility::Public => "public", tuppira_shared::TenantVisibility::Tenant { .. } => "tenant" }
+            })
+        })
+        .collect();
+    Ok(Json(ApiResponse::from(data)))
+}
+
 fn auth_error(status: StatusCode) -> (StatusCode, Json<ErrorResponse>) {
     let message = if status == StatusCode::SERVICE_UNAVAILABLE {
         "observation authentication is not configured"
