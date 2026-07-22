@@ -1,13 +1,18 @@
-# The Dockerfile is built from the projects monorepo root. Send only the two
-# workspaces it deliberately copies, never local artifacts or unrelated repos.
+# Built from the diewan monorepo root. Send only the tuppira workspace plus
+# parwana (its path dependency); never local artifacts or unrelated repos.
 **
-!csv-protocol/
-!csv-protocol/**
-!csv-apps/
-!csv-apps/tuppira/
-!csv-apps/tuppira/**
+!parwana/
+!parwana/**
+!tuppira/
+!tuppira/**
 
-csv-protocol/**/target/
-csv-apps/tuppira/**/target/
-csv-apps/tuppira/data/
-csv-apps/tuppira/.git/
+parwana/target/
+parwana/**/target/
+tuppira/target/
+tuppira/**/target/
+tuppira/data/
+**/.git/
+**/node_modules/
+**/*.pem
+**/.env
+**/.env.*

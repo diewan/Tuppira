@@ -1,47 +1,51 @@
 # syntax=docker/dockerfile:1
-# Build from the `Work/` monorepo directory so the protocol path dependencies
-# are inside the declared build context:
-# docker build -f csv-apps/tuppira/Dockerfile --target api .
-FROM rust:1.95-slim-bookworm AS builder
+#
+# Tuppira observation-plane images (indexer + api).
+#
+# Updated for the diewan monorepo layout (DEP-04). Build context is the diewan
+# root so tuppira's path dependency on ../parwana resolves, and the DEP-01
+# shared builder base (diewan/rust-base) supplies the pre-compiled parwana
+# dependency graph via the shared CARGO_TARGET_DIR=/workspace/target.
+#
+#   docker build -f tuppira/Dockerfile --target api     -t diewan/tuppira-api:0.1     .
+#   docker build -f tuppira/Dockerfile --target indexer -t diewan/tuppira-indexer:0.1 .
+#
+# Compose builds it with context ../.. from deployment/compose/.
+ARG RUST_BASE=diewan/rust-base:latest
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev libsqlite3-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /workspace/csv-apps/tuppira
-
-# Both workspaces are deliberate build inputs. No Docker COPY reaches outside
-# the context, and the UI is intentionally not part of either production image.
-COPY csv-protocol /workspace/csv-protocol
-COPY csv-apps/tuppira /workspace/csv-apps/tuppira
-
+# ── builder ──────────────────────────────────────────────────────────────────
+FROM ${RUST_BASE} AS builder
+# parwana must sit at /workspace/parwana so tuppira's ../parwana path dep resolves.
+COPY parwana /workspace/parwana
+COPY tuppira /workspace/tuppira
+WORKDIR /workspace/tuppira
 RUN cargo build --locked --release \
     --package tuppira-indexer \
     --package tuppira-api
 
+# ── runtime base ─────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime-base
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libsqlite3-0 \
+    ca-certificates libsqlite3-0 curl \
     && rm -rf /var/lib/apt/lists/*
-
 RUN install -d -o 1000 -g 1000 /app/data
 WORKDIR /app
-COPY csv-apps/tuppira/config.example.toml /app/config.toml
+# Ship the config profiles; the running service selects one with --config.
+COPY tuppira/config.example.toml tuppira/config.testnet.toml tuppira/config.mainnet.toml /app/
 USER 1000
 
+# ── indexer (also runs the one-shot `ingest-piteka`) ─────────────────────────
 FROM runtime-base AS indexer
-COPY --from=builder /workspace/csv-apps/tuppira/target/release/tuppira-indexer /usr/local/bin/
+# Output lives under the shared CARGO_TARGET_DIR, not the workspace-local target.
+COPY --from=builder /workspace/target/release/tuppira-indexer /usr/local/bin/
 ENTRYPOINT ["tuppira-indexer"]
-CMD ["start"]
+CMD ["--config", "config.testnet.toml", "start"]
 
+# ── api (read model, port 8081 under the testnet profile) ────────────────────
 FROM runtime-base AS api
-USER root
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /workspace/csv-apps/tuppira/target/release/tuppira-api /usr/local/bin/
-USER 1000
-EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 CMD curl -fsS http://localhost:8080/health || exit 1
+COPY --from=builder /workspace/target/release/tuppira-api /usr/local/bin/
+EXPOSE 8081
+HEALTHCHECK --interval=30s --timeout=10s --retries=5 --start-period=15s \
+    CMD curl -fsS http://localhost:8081/health || exit 1
 ENTRYPOINT ["tuppira-api"]
-CMD ["start"]
+CMD ["--config", "config.testnet.toml", "start"]

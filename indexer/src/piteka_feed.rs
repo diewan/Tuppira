@@ -383,6 +383,12 @@ struct ExportManifest {
     evidence_gaps: Vec<ExportGapDescriptor>,
     source_attribution: ExportSourceAttribution,
     missing_evidence: ExportMissingEvidence,
+    // Present only when the mandate's single use was independently anchored;
+    // absent/`null` is a limitation the verifier reports, never a failure
+    // (Piteka bundle_export §5.5, §5.9). Optional here so exports predating the
+    // anchor field, and unanchored mandates, still normalize.
+    #[serde(default)]
+    single_use_anchor: Option<ExportSingleUseAnchor>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -421,6 +427,14 @@ struct ExportMissingEvidence {
     gap_count: usize,
     gaps: Vec<String>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportSingleUseAnchor {
+    seal_id_hex: String,
+    nullifier_hex: String,
+    commitment_hex: String,
+    anchor_backend: String,
+}
 impl ExportManifest {
     fn validate(&self) -> ConnectorResult<()> {
         if self.bundle_version != "0.1" || self.receipt.created_at == 0 {
@@ -455,6 +469,12 @@ impl ExportManifest {
             self.source_attribution.provider_observations,
             self.source_attribution.verifier_conclusions,
         );
+        if let Some(anchor) = &self.single_use_anchor {
+            validate_text(&anchor.anchor_backend, "single_use_anchor.anchor_backend")?;
+            decode_sha256(&anchor.seal_id_hex)?;
+            decode_sha256(&anchor.nullifier_hex)?;
+            decode_sha256(&anchor.commitment_hex)?;
+        }
         Ok(())
     }
 

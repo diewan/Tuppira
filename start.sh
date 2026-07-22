@@ -37,7 +37,11 @@ start_api() {
         echo "✅ API server is already running"
     else
         cd "$EXPLORER_DIR"
-        nohup cargo run -p tuppira-api -- --config "$CONFIG_FILE" start > "/tmp/tuppira-api-$NETWORK.log" 2>&1 &
+        # Compile first so the health-check window below times the server's
+        # startup, not a cold cargo build (which used to overrun it and fail).
+        echo "   building tuppira-api..."
+        cargo build -p tuppira-api > "/tmp/tuppira-api-$NETWORK.log" 2>&1
+        nohup cargo run -p tuppira-api -- --config "$CONFIG_FILE" start >> "/tmp/tuppira-api-$NETWORK.log" 2>&1 &
         echo $! >> "$PID_FILE"
         sleep 5
 
@@ -66,7 +70,9 @@ start_indexer() {
         echo "✅ Indexer is already running"
     else
         cd "$EXPLORER_DIR"
-        nohup cargo run -p tuppira-indexer -- --config "$CONFIG_FILE" start > "/tmp/tuppira-indexer-$NETWORK.log" 2>&1 &
+        echo "   building tuppira-indexer..."
+        cargo build -p tuppira-indexer > "/tmp/tuppira-indexer-$NETWORK.log" 2>&1
+        nohup cargo run -p tuppira-indexer -- --config "$CONFIG_FILE" start >> "/tmp/tuppira-indexer-$NETWORK.log" 2>&1 &
         echo $! >> "$PID_FILE"
         sleep 3
         echo "✅ Indexer started (see logs: /tmp/tuppira-indexer-$NETWORK.log)"
