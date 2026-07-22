@@ -17,6 +17,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         4,
         include_str!("../migrations/0004_reconciliation_history.sql"),
     ),
+    (
+        5,
+        include_str!("../migrations/0005_accountable_entities.sql"),
+    ),
 ];
 
 /// Initialize the database connection pool and apply schema.
@@ -109,7 +113,7 @@ mod tests {
             sqlx::query_scalar("SELECT COUNT(*) FROM _tuppira_migrations")
                 .fetch_one(&pool)
                 .await;
-        assert!(matches!(count, Ok(4)));
+        assert!(matches!(count, Ok(5)));
         let observation_tables: Result<i64, sqlx::Error> = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('observations', 'raw_payload_descriptors', 'collection_runs', 'sync_cursors', 'supersessions')",
         ).fetch_one(&pool).await;
@@ -126,7 +130,7 @@ mod tests {
             sqlx::query_scalar("SELECT COUNT(*) FROM _tuppira_migrations")
                 .fetch_one(&pool)
                 .await;
-        assert!(matches!(count, Ok(4)));
+        assert!(matches!(count, Ok(5)));
     }
 
     #[tokio::test]

@@ -7,7 +7,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use tuppira_storage::repositories::{
-    ObservationRepository, SanadsRepository, SealsRepository, StatsRepository, TransfersRepository,
+    EntityRepository, ObservationRepository, SanadsRepository, SealsRepository, StatsRepository,
+    TransfersRepository,
 };
 
 use std::str::FromStr;
@@ -61,6 +62,61 @@ impl<T: Serialize> From<T> for ApiResponse<T> {
             success: true,
         }
     }
+}
+
+/// GET /api/v1/entities/:id. This is an observational profile, never an
+/// authorization conclusion. Tenant scope is derived from authenticated access.
+pub async fn entity_profile(
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    State((_, pool, _, _)): State<AppState>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
+    let access = crate::access::authenticate(&headers).map_err(auth_error)?;
+    let profile = EntityRepository::new(pool)
+        .profile(&access.tenant_id, &id)
+        .await
+        .map_err(tuppira_error)?;
+    Ok(Json(ApiResponse::from(serde_json::json!({
+        "entity_id": profile.entity_id,
+        "entity_kind": profile.entity_kind,
+        "display_name": profile.display_name,
+        "profile_digest": profile.profile_digest_hex,
+        "updated_at": profile.updated_at,
+        "semantics": "observational_not_authorization"
+    }))))
+}
+
+/// GET /api/v1/entities/:id/accountability. Missing or withheld relationships
+/// remain explicit records and are never interpreted as authorization.
+pub async fn entity_accountability(
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    State((_, pool, _, _)): State<AppState>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
+    let access = crate::access::authenticate(&headers).map_err(auth_error)?;
+    let aggregate = EntityRepository::new(pool)
+        .aggregate(&access.tenant_id, &id)
+        .await
+        .map_err(tuppira_error)?;
+    Ok(Json(ApiResponse::from(serde_json::json!({
+        "entity": {
+            "entity_id": aggregate.profile.entity_id,
+            "entity_kind": aggregate.profile.entity_kind,
+            "display_name": aggregate.profile.display_name,
+            "profile_digest": aggregate.profile.profile_digest_hex,
+            "updated_at": aggregate.profile.updated_at
+        },
+        "references": aggregate.references.into_iter().map(|item| serde_json::json!({
+            "kind": item.ref_kind, "disclosure_state": item.disclosure_state,
+            "object_id": item.object_id, "source_observation_id": item.source_observation_id,
+            "observed_at": item.observed_at
+        })).collect::<Vec<_>>(),
+        "relationships": aggregate.relationships.into_iter().map(|item| serde_json::json!({
+            "kind": item.relationship_kind, "disclosure_state": item.disclosure_state,
+            "related_entity_id": item.related_entity_id
+        })).collect::<Vec<_>>(),
+        "semantics": "observational_not_authorization"
+    }))))
 }
 
 /// Reconnect cursor for the versioned, untrusted wallet discovery feed.
