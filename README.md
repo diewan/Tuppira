@@ -21,6 +21,50 @@ the deepest all-chain user experience.
 The developer-facing UI (explorer, wallet, and protocol debugger) is
 [Hemion](../hemion); Tuppira is the data layer beneath it.
 
+## Topology
+
+Where Tuppira sits in the DieWan Accountability Platform:
+
+```mermaid
+flowchart TB
+  PAR["Parwana · protocol<br/>canonical bytes · verifier · SDK"]
+  PIT["Piteka · product<br/>authorize · execute · investigate · Postgres live state"]
+  TUP["Tuppira · data plane<br/>observe · index · read model"]
+  HEM["Hemion · developer console<br/>explorer · local verifier · wallet"]
+  CON["csv-contracts · chain anchors<br/>optional anchor provider"]
+
+  PIT -->|uses protocol + verifier| PAR
+  PIT -->|signed evidence feed| TUP
+  TUP -->|read model| HEM
+  HEM -->|verifies locally| PAR
+  PAR -.->|anchors commitments| CON
+  TUP -.->|observes anchors| CON
+
+  classDef here fill:#2563eb,stroke:#1d4ed8,color:#ffffff;
+  class TUP here;
+```
+
+**You are here — Tuppira**, the data plane. It *observes and indexes* Parwana
+activity (from the [Piteka](../piteka) evidence feed and from chains) and serves
+a read model to [Hemion](../hemion). It never authorizes anything and never
+redefines [Parwana](../parwana) protocol meaning. See the org charter in
+[`development/ARCHITECTURE.md`](../development/ARCHITECTURE.md).
+
+## Glossary
+
+Key terms a newcomer will meet in Tuppira:
+
+| Term | Kind | Plain-English meaning | Real-world example |
+|------|------|-----------------------|--------------------|
+| CSV (Cross-Chain Sealed Verifiable) | Keyword | The Parwana protocol data Tuppira traces — sanads, seals, transfers, and contracts — validated client-side. | The specific "shipments" this tracker follows, ignoring everything else on the chain. |
+| Sanad | Data structure | Parwana's proof-carrying ownership instrument; stored by Tuppira as `SanadRecord`. | A property deed that carries its own chain of proof. |
+| Seal | Data structure | A consumable ownership condition closed exactly once; stored as `SealRecord`. | A tamper-evident seal: once broken, it can't be reused. |
+| Transfer | Data structure | A state transition moving ownership; stored as `TransferRecord`. | Endorsing a cheque over to a new payee. |
+| Contract | Data structure | A Parwana on-chain contract Tuppira indexes (`CsvContract`); it links out to official explorers for deeper chain data. | A registered agreement whose entries the tracker files. |
+| Observation | Keyword | Read-only watching and indexing of protocol activity; Tuppira observes, never authorizes. | A CCTV recorder: it captures events but can't approve them. |
+| Lineage | Keyword | The traced chain of related objects (mandate → action → receipt → …). | A parcel's tracking history from dispatch to delivery. |
+| Anchor | Keyword | A commitment published on a chain; Tuppira observes anchors but never creates them. | A notary stamp Tuppira reads but cannot issue. |
+
 ## Architecture
 
 ```
