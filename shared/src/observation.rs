@@ -429,6 +429,160 @@ fn validate_status_history(
     }
 }
 
+// ── On-chain anchor observations (ANCHOR-01) ─────────────────────────────────
+
+/// One observation-plane read of an on-chain accountability anchor's finality.
+///
+/// Tuppira *observes* anchor finality; it never asserts it. A set of these from
+/// different sources is reconciled with the Parwana [`reconcile_anchor`] semantics
+/// — the single protocol source of truth — so a reorg or RPC disagreement is
+/// preserved as an explicit disagreement, never collapsed into a false final.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnchorFinalityObservation {
+    /// Observation schema version.
+    pub schema_version: u16,
+    /// The anchored commitment digest, hex-encoded.
+    pub commitment_hex: String,
+    /// Canonical chain identifier (for example `ethereum-sepolia`).
+    pub chain_id: String,
+    /// The observing source (for example an RPC endpoint id).
+    pub source: String,
+    /// The block height the source reports for the anchor.
+    pub block_height: u64,
+    /// The block hash the source reports at that height, hex-encoded.
+    pub block_hash_hex: String,
+    /// Confirmations observed so far by this source.
+    pub observed_confirmations: u64,
+    /// Reorg-safe confirmations required before the anchor is final.
+    pub required_confirmations: u64,
+}
+
+/// A failure reconciling anchor observations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnchorObservationError {
+    /// A block hash was not 32 bytes of hex.
+    MalformedBlockHash,
+}
+
+impl core::fmt::Display for AnchorObservationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::MalformedBlockHash => f.write_str("block hash must be 32 bytes of hex"),
+        }
+    }
+}
+
+impl std::error::Error for AnchorObservationError {}
+
+fn parse_block_hash(hex: &str) -> Result<[u8; 32], AnchorObservationError> {
+    let bytes = ::hex::decode(hex).map_err(|_| AnchorObservationError::MalformedBlockHash)?;
+    let array: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| AnchorObservationError::MalformedBlockHash)?;
+    Ok(array)
+}
+
+/// Reconciles a set of anchor finality observations using the Parwana protocol
+/// reconciliation. Sources that disagree on the including block yield an explicit
+/// [`csv_sdk::accountability::AnchorReconciliation::Disagreement`] (a reorg or RPC
+/// disagreement); only unanimous agreement can be `Agreed`, and finality is never
+/// fabricated.
+///
+/// # Errors
+///
+/// Returns [`AnchorObservationError::MalformedBlockHash`] if any observation's
+/// block hash is not 32 bytes of hex.
+pub fn reconcile_anchor_observations(
+    records: &[AnchorFinalityObservation],
+) -> Result<csv_sdk::accountability::AnchorReconciliation, AnchorObservationError> {
+    use csv_sdk::accountability::{AnchorFinality, AnchorObservation, reconcile_anchor};
+
+    let observations: Vec<AnchorObservation> = records
+        .iter()
+        .map(|record| {
+            Ok(AnchorObservation {
+                source: record.source.clone(),
+                block_height: record.block_height,
+                block_hash: parse_block_hash(&record.block_hash_hex)?,
+                finality: AnchorFinality::from_confirmations(
+                    record.observed_confirmations,
+                    record.required_confirmations,
+                ),
+            })
+        })
+        .collect::<Result<_, AnchorObservationError>>()?;
+    Ok(reconcile_anchor(&observations))
+}
+
+#[cfg(test)]
+mod anchor_observation_tests {
+    use super::*;
+    use csv_sdk::accountability::AnchorReconciliation;
+
+    fn record(source: &str, block_hash_hex: &str, observed: u64) -> AnchorFinalityObservation {
+        AnchorFinalityObservation {
+            schema_version: OBSERVATION_SCHEMA_VERSION,
+            commitment_hex: "11".repeat(32),
+            chain_id: "ethereum-sepolia".to_string(),
+            source: source.to_string(),
+            block_height: 1_000,
+            block_hash_hex: block_hash_hex.to_string(),
+            observed_confirmations: observed,
+            required_confirmations: 12,
+        }
+    }
+
+    #[test]
+    fn unanimous_final_observations_agree_final() {
+        let reconciliation = reconcile_anchor_observations(&[
+            record("rpc-a", &"22".repeat(32), 20),
+            record("rpc-b", &"22".repeat(32), 20),
+        ])
+        .unwrap();
+        match reconciliation {
+            AnchorReconciliation::Agreed { finality, .. } => assert!(finality.is_final()),
+            other => panic!("expected agreed-final, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reorg_between_sources_is_a_disagreement_not_a_false_final() {
+        // Two sources report a different block hash at the same height: a reorg /
+        // RPC disagreement. It must be preserved, never resolved into a final.
+        let reconciliation = reconcile_anchor_observations(&[
+            record("rpc-a", &"22".repeat(32), 20),
+            record("rpc-b", &"33".repeat(32), 20),
+        ])
+        .unwrap();
+        assert!(matches!(
+            reconciliation,
+            AnchorReconciliation::Disagreement { .. }
+        ));
+    }
+
+    #[test]
+    fn a_lagging_source_keeps_the_reconciliation_pending() {
+        let reconciliation = reconcile_anchor_observations(&[
+            record("rpc-a", &"22".repeat(32), 20),
+            record("rpc-b", &"22".repeat(32), 2),
+        ])
+        .unwrap();
+        match reconciliation {
+            AnchorReconciliation::Agreed { finality, .. } => assert!(!finality.is_final()),
+            other => panic!("expected agreed-pending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_malformed_block_hash_fails_closed() {
+        assert_eq!(
+            reconcile_anchor_observations(&[record("rpc-a", "not-hex", 20)]),
+            Err(AnchorObservationError::MalformedBlockHash)
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -826,6 +826,7 @@ mod tests {
                 gap_count: 0,
                 gaps: Vec::new(),
             },
+            single_use_anchor: None,
         };
         assert!(manifest.deployment_profile().is_err());
 
