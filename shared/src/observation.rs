@@ -32,7 +32,7 @@ pub enum ObservedOrMissing<T> {
 /// One source-reported deployment status. This is history, not a truth verdict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeploymentStatusObservation {
+pub struct DeploymentStatusReading {
     pub status: String,
     pub asserted_at: u64,
     pub evidence_refs: Vec<String>,
@@ -41,7 +41,7 @@ pub struct DeploymentStatusObservation {
 /// Provider workflow identity, when the disclosed evidence identifies one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowIdentityObservation {
+pub struct WorkflowIdentityReading {
     pub provider: String,
     pub repository: String,
     pub workflow_ref: String,
@@ -52,7 +52,7 @@ pub struct WorkflowIdentityObservation {
 /// Artifact material reported in the export. Authenticity is deliberately not inferred.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ArtifactAttestationObservation {
+pub struct ArtifactAttestationReading {
     pub digest_algorithm: String,
     /// The artifact digest may be withheld even when an attestation is present.
     pub artifact_digest: ObservedOrMissing<ContentDigest>,
@@ -61,21 +61,26 @@ pub struct ArtifactAttestationObservation {
     pub attestation_evidence_refs: Vec<String>,
 }
 
-/// Typed projection used by F-05. Every required evidence class remains explicit.
+/// Versioned normalized projection nested inside an [`ObservationRecord`].
+///
+/// The nested readings deliberately do not repeat provenance: the containing
+/// observation supplies source identity, collection run, acquisition time,
+/// authenticity references, tenant visibility, and raw-payload commitment.
+/// `ObservedOrMissing` preserves uncertainty for every optional evidence class.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeploymentAttestationObservationProfile {
+pub struct DeploymentAttestationProjectionV1 {
     pub schema_version: u16,
     pub receipt_id: String,
     pub mandate_id: String,
     pub intent_id: String,
     pub attempt_id: String,
-    pub status_history: ObservedOrMissing<Vec<DeploymentStatusObservation>>,
-    pub workflow_identity: ObservedOrMissing<WorkflowIdentityObservation>,
-    pub artifact_attestation: ObservedOrMissing<ArtifactAttestationObservation>,
+    pub status_history: ObservedOrMissing<Vec<DeploymentStatusReading>>,
+    pub workflow_identity: ObservedOrMissing<WorkflowIdentityReading>,
+    pub artifact_attestation: ObservedOrMissing<ArtifactAttestationReading>,
 }
 
-impl DeploymentAttestationObservationProfile {
+impl DeploymentAttestationProjectionV1 {
     pub fn validate(&self) -> Result<(), ObservationValidationError> {
         validate_version(self.schema_version)?;
         for (value, field) in [
@@ -167,6 +172,12 @@ pub enum TenantVisibility {
 }
 
 /// A normalized, source-bounded account of one source event.
+///
+/// This is a constitutional Observation: `source_id` and
+/// `collection_run_id` identify provenance, `observed_at` is acquisition time,
+/// `raw_payload_digest` links exact source bytes when disclosed, and optional
+/// source assertions remain optional rather than being inferred. Profile
+/// fields which need reasons for absence use [`ObservedOrMissing`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservationRecord {
@@ -405,7 +416,7 @@ fn validate_reasons(reasons: &[String]) -> Result<(), ObservationValidationError
 }
 
 fn validate_status_history(
-    history: &ObservedOrMissing<Vec<DeploymentStatusObservation>>,
+    history: &ObservedOrMissing<Vec<DeploymentStatusReading>>,
 ) -> Result<(), ObservationValidationError> {
     match history {
         ObservedOrMissing::Missing { reasons } => validate_reasons(reasons),
@@ -431,16 +442,17 @@ fn validate_status_history(
 
 // ── On-chain anchor observations (ANCHOR-01) ─────────────────────────────────
 
-/// One observation-plane read of an on-chain accountability anchor's finality.
+/// One source-shaped read of an on-chain accountability anchor's finality.
 ///
-/// Tuppira *observes* anchor finality; it never asserts it. A set of these from
-/// different sources is reconciled with the Parwana [`reconcile_anchor`] semantics
-/// — the single protocol source of truth — so a reorg or RPC disagreement is
-/// preserved as an explicit disagreement, never collapsed into a false final.
+/// This value has no collection-run or raw-payload provenance and is therefore
+/// a Reading, not a constitutional Observation. Tuppira never asserts finality.
+/// A set of readings is assessed with Parwana's
+/// [`csv_sdk::accountability::reconcile_chain_anchor_observations`] semantics,
+/// preserving reorg or RPC disagreement rather than inventing a false final.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AnchorFinalityObservation {
-    /// Observation schema version.
+pub struct AnchorFinalityReading {
+    /// Reading schema version.
     pub schema_version: u16,
     /// The anchored commitment digest, hex-encoded.
     pub commitment_hex: String,
@@ -458,14 +470,14 @@ pub struct AnchorFinalityObservation {
     pub required_confirmations: u64,
 }
 
-/// A failure reconciling anchor observations.
+/// A malformed input failure while assessing anchor finality readings.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AnchorObservationError {
+pub enum AnchorFinalityReadingError {
     /// A block hash was not 32 bytes of hex.
     MalformedBlockHash,
 }
 
-impl core::fmt::Display for AnchorObservationError {
+impl core::fmt::Display for AnchorFinalityReadingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::MalformedBlockHash => f.write_str("block hash must be 32 bytes of hex"),
@@ -473,55 +485,58 @@ impl core::fmt::Display for AnchorObservationError {
     }
 }
 
-impl std::error::Error for AnchorObservationError {}
+impl std::error::Error for AnchorFinalityReadingError {}
 
-fn parse_block_hash(hex: &str) -> Result<[u8; 32], AnchorObservationError> {
-    let bytes = ::hex::decode(hex).map_err(|_| AnchorObservationError::MalformedBlockHash)?;
+fn parse_block_hash(hex: &str) -> Result<[u8; 32], AnchorFinalityReadingError> {
+    let bytes = ::hex::decode(hex).map_err(|_| AnchorFinalityReadingError::MalformedBlockHash)?;
     let array: [u8; 32] = bytes
         .try_into()
-        .map_err(|_| AnchorObservationError::MalformedBlockHash)?;
+        .map_err(|_| AnchorFinalityReadingError::MalformedBlockHash)?;
     Ok(array)
 }
 
-/// Reconciles a set of anchor finality observations using the Parwana protocol
-/// reconciliation. Sources that disagree on the including block yield an explicit
+/// Assesses anchor finality readings using the Parwana protocol reconciliation.
+/// Sources that disagree on the including block yield an explicit
 /// [`csv_sdk::accountability::AnchorReconciliation::Disagreement`] (a reorg or RPC
 /// disagreement); only unanimous agreement can be `Agreed`, and finality is never
 /// fabricated.
 ///
 /// # Errors
 ///
-/// Returns [`AnchorObservationError::MalformedBlockHash`] if any observation's
+/// Returns [`AnchorFinalityReadingError::MalformedBlockHash`] if any observation's
 /// block hash is not 32 bytes of hex.
-pub fn reconcile_anchor_observations(
-    records: &[AnchorFinalityObservation],
-) -> Result<csv_sdk::accountability::AnchorReconciliation, AnchorObservationError> {
-    use csv_sdk::accountability::{AnchorFinality, AnchorObservation, reconcile_anchor};
+pub fn assess_anchor_finality_readings(
+    records: &[AnchorFinalityReading],
+) -> Result<csv_sdk::accountability::ChainAnchorReconciliationResult, AnchorFinalityReadingError> {
+    use csv_sdk::accountability::{
+        ChainAnchorFinalityStatus, ChainAnchorSourceObservation,
+        reconcile_chain_anchor_observations,
+    };
 
-    let observations: Vec<AnchorObservation> = records
+    let observations: Vec<ChainAnchorSourceObservation> = records
         .iter()
         .map(|record| {
-            Ok(AnchorObservation {
+            Ok(ChainAnchorSourceObservation {
                 source: record.source.clone(),
                 block_height: record.block_height,
                 block_hash: parse_block_hash(&record.block_hash_hex)?,
-                finality: AnchorFinality::from_confirmations(
+                finality: ChainAnchorFinalityStatus::from_confirmations(
                     record.observed_confirmations,
                     record.required_confirmations,
                 ),
             })
         })
-        .collect::<Result<_, AnchorObservationError>>()?;
-    Ok(reconcile_anchor(&observations))
+        .collect::<Result<_, AnchorFinalityReadingError>>()?;
+    Ok(reconcile_chain_anchor_observations(&observations))
 }
 
 #[cfg(test)]
 mod anchor_observation_tests {
     use super::*;
-    use csv_sdk::accountability::AnchorReconciliation;
+    use csv_sdk::accountability::ChainAnchorReconciliationResult;
 
-    fn record(source: &str, block_hash_hex: &str, observed: u64) -> AnchorFinalityObservation {
-        AnchorFinalityObservation {
+    fn record(source: &str, block_hash_hex: &str, observed: u64) -> AnchorFinalityReading {
+        AnchorFinalityReading {
             schema_version: OBSERVATION_SCHEMA_VERSION,
             commitment_hex: "11".repeat(32),
             chain_id: "ethereum-sepolia".to_string(),
@@ -535,13 +550,15 @@ mod anchor_observation_tests {
 
     #[test]
     fn unanimous_final_observations_agree_final() {
-        let reconciliation = reconcile_anchor_observations(&[
+        let reconciliation = assess_anchor_finality_readings(&[
             record("rpc-a", &"22".repeat(32), 20),
             record("rpc-b", &"22".repeat(32), 20),
         ])
         .unwrap();
         match reconciliation {
-            AnchorReconciliation::Agreed { finality, .. } => assert!(finality.is_final()),
+            ChainAnchorReconciliationResult::Agreed { finality, .. } => {
+                assert!(finality.is_final())
+            }
             other => panic!("expected agreed-final, got {other:?}"),
         }
     }
@@ -550,26 +567,28 @@ mod anchor_observation_tests {
     fn reorg_between_sources_is_a_disagreement_not_a_false_final() {
         // Two sources report a different block hash at the same height: a reorg /
         // RPC disagreement. It must be preserved, never resolved into a final.
-        let reconciliation = reconcile_anchor_observations(&[
+        let reconciliation = assess_anchor_finality_readings(&[
             record("rpc-a", &"22".repeat(32), 20),
             record("rpc-b", &"33".repeat(32), 20),
         ])
         .unwrap();
         assert!(matches!(
             reconciliation,
-            AnchorReconciliation::Disagreement { .. }
+            ChainAnchorReconciliationResult::Disagreement { .. }
         ));
     }
 
     #[test]
     fn a_lagging_source_keeps_the_reconciliation_pending() {
-        let reconciliation = reconcile_anchor_observations(&[
+        let reconciliation = assess_anchor_finality_readings(&[
             record("rpc-a", &"22".repeat(32), 20),
             record("rpc-b", &"22".repeat(32), 2),
         ])
         .unwrap();
         match reconciliation {
-            AnchorReconciliation::Agreed { finality, .. } => assert!(!finality.is_final()),
+            ChainAnchorReconciliationResult::Agreed { finality, .. } => {
+                assert!(!finality.is_final())
+            }
             other => panic!("expected agreed-pending, got {other:?}"),
         }
     }
@@ -577,8 +596,8 @@ mod anchor_observation_tests {
     #[test]
     fn a_malformed_block_hash_fails_closed() {
         assert_eq!(
-            reconcile_anchor_observations(&[record("rpc-a", "not-hex", 20)]),
-            Err(AnchorObservationError::MalformedBlockHash)
+            assess_anchor_finality_readings(&[record("rpc-a", "not-hex", 20)]),
+            Err(AnchorFinalityReadingError::MalformedBlockHash)
         );
     }
 }
@@ -662,14 +681,14 @@ mod tests {
 
     #[test]
     fn deployment_profile_preserves_observed_and_missing_evidence() {
-        let profile = DeploymentAttestationObservationProfile {
+        let profile = DeploymentAttestationProjectionV1 {
             schema_version: OBSERVATION_SCHEMA_VERSION,
             receipt_id: "receipt:1".into(),
             mandate_id: "mandate:1".into(),
             intent_id: "intent:1".into(),
             attempt_id: "attempt:1".into(),
             status_history: ObservedOrMissing::Observed {
-                value: vec![DeploymentStatusObservation {
+                value: vec![DeploymentStatusReading {
                     status: "succeeded".into(),
                     asserted_at: 10,
                     evidence_refs: vec!["evidence:status:1".into()],
@@ -679,7 +698,7 @@ mod tests {
                 reasons: vec!["workflow identity was not disclosed".into()],
             },
             artifact_attestation: ObservedOrMissing::Observed {
-                value: ArtifactAttestationObservation {
+                value: ArtifactAttestationReading {
                     digest_algorithm: "sha-256".into(),
                     artifact_digest: ObservedOrMissing::Observed { value: [3; 32] },
                     attestation_digest: [4; 32],
@@ -692,7 +711,7 @@ mod tests {
 
     #[test]
     fn deployment_profile_rejects_implicit_or_ambiguous_absence() {
-        let profile = DeploymentAttestationObservationProfile {
+        let profile = DeploymentAttestationProjectionV1 {
             schema_version: OBSERVATION_SCHEMA_VERSION,
             receipt_id: "receipt:1".into(),
             mandate_id: "mandate:1".into(),
@@ -707,5 +726,13 @@ mod tests {
             },
         };
         assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn source_rename_preserves_deployment_projection_wire_shape() -> Result<(), serde_json::Error> {
+        let json = r#"{"schema_version":1,"receipt_id":"receipt:1","mandate_id":"mandate:1","intent_id":"intent:1","attempt_id":"attempt:1","status_history":{"availability":"missing","reasons":["not disclosed"]},"workflow_identity":{"availability":"missing","reasons":["not disclosed"]},"artifact_attestation":{"availability":"missing","reasons":["not disclosed"]}}"#;
+        let projection: DeploymentAttestationProjectionV1 = serde_json::from_str(json)?;
+        assert_eq!(serde_json::to_string(&projection)?, json);
+        Ok(())
     }
 }

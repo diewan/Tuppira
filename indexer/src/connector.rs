@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use std::collections::HashSet;
 
 use tuppira_shared::{
-    ContradictionHintRecord, DeploymentAttestationObservationProfile, ObservationRecord,
+    ContradictionHintRecord, DeploymentAttestationProjectionV1, ObservationRecord,
     ProviderSignatureRecord, RawPayloadDescriptor, ReorgRecord, SupersessionRecord,
     TenantVisibility, TuppiraError,
 };
@@ -157,18 +157,21 @@ pub enum SourceAuthentication {
     },
 }
 
-/// Versioned normalized output, still explicitly an observation rather than a claim.
+/// Input to persistence after authenticated bytes have been normalized.
+///
+/// The contained [`ObservationRecord`] has full constitutional provenance; the
+/// wrapper is named Input because it has not yet passed storage constraints.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObservationCandidate {
+pub struct NormalizedObservationInput {
     pub observation: ObservationRecord,
     pub raw_payload: Option<RawPayloadDescriptor>,
     /// Present only for the typed deployment/attestation normalization profile.
-    pub deployment_profile: Option<DeploymentAttestationObservationProfile>,
+    pub deployment_profile: Option<DeploymentAttestationProjectionV1>,
 }
 
-/// Non-authoritative reconciliation findings; storage decides append-only lineage.
+/// Non-authoritative comparison assessment; never a source fact or verifier result.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReconciliationReport {
+pub struct SourceReconciliationAssessment {
     pub source_id: String,
     pub subject_ref: String,
     pub reorgs: Vec<ReorgRecord>,
@@ -176,7 +179,7 @@ pub struct ReconciliationReport {
     pub contradictions: Vec<ContradictionHintRecord>,
 }
 
-impl ReconciliationReport {
+impl SourceReconciliationAssessment {
     /// Validate connector-owned reconciliation output before persistence. This
     /// checks shape and source ownership; storage enforces relational and tenant invariants.
     pub fn validate(&self, expected_source_id: &str) -> ConnectorResult<()> {
@@ -259,7 +262,7 @@ pub trait SourceConnector: Send + Sync {
         &self,
         raw_event: &RawSourceEvent,
         profile_version: u16,
-    ) -> ConnectorResult<ObservationCandidate>;
+    ) -> ConnectorResult<NormalizedObservationInput>;
 
     fn checkpoint(&self, batch: &RawSourceBatch) -> ConnectorResult<ConnectorCursor>;
 
@@ -267,7 +270,7 @@ pub trait SourceConnector: Send + Sync {
         &self,
         subject_ref: &str,
         interval: (u64, u64),
-    ) -> ConnectorResult<ReconciliationReport>;
+    ) -> ConnectorResult<SourceReconciliationAssessment>;
 
     async fn health(&self) -> SourceHealth;
 }
@@ -277,7 +280,7 @@ pub async fn authenticate_and_normalize(
     connector: &dyn SourceConnector,
     raw_event: &RawSourceEvent,
     profile_version: u16,
-) -> ConnectorResult<ObservationCandidate> {
+) -> ConnectorResult<NormalizedObservationInput> {
     raw_event.validate()?;
     if raw_event.source_id != connector.source_id() {
         return Err(ConnectorError::SourceMismatch {
@@ -404,14 +407,14 @@ mod tests {
             &self,
             raw_event: &RawSourceEvent,
             profile_version: u16,
-        ) -> ConnectorResult<ObservationCandidate> {
+        ) -> ConnectorResult<NormalizedObservationInput> {
             if profile_version != 1 {
                 return Err(ConnectorError::UnsupportedProfile {
                     profile_id: "fixture.v1".to_string(),
                     version: profile_version,
                 });
             }
-            Ok(ObservationCandidate {
+            Ok(NormalizedObservationInput {
                 observation: ObservationRecord {
                     schema_version: OBSERVATION_SCHEMA_VERSION,
                     observation_id: "observation:fixture:1".to_string(),
@@ -450,11 +453,11 @@ mod tests {
             &self,
             subject_ref: &str,
             interval: (u64, u64),
-        ) -> ConnectorResult<ReconciliationReport> {
+        ) -> ConnectorResult<SourceReconciliationAssessment> {
             if subject_ref.is_empty() || interval.0 > interval.1 {
                 return Err(ConnectorError::InvalidField("reconcile"));
             }
-            Ok(ReconciliationReport {
+            Ok(SourceReconciliationAssessment {
                 source_id: self.source_id().to_string(),
                 subject_ref: subject_ref.to_string(),
                 reorgs: Vec::new(),
@@ -632,7 +635,7 @@ mod tests {
 
     #[test]
     fn reconciliation_rejects_cross_source_and_ambiguous_reorgs() {
-        let report = ReconciliationReport {
+        let report = SourceReconciliationAssessment {
             source_id: "source:fixture".into(),
             subject_ref: "subject:1".into(),
             reorgs: vec![ReorgRecord {

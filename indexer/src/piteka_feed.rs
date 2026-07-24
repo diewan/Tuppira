@@ -10,16 +10,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tuppira_shared::{
-    ArtifactAttestationObservation, DEPLOYMENT_ATTESTATION_PROFILE_ID,
-    DeploymentAttestationObservationProfile, DeploymentStatusObservation,
-    OBSERVATION_SCHEMA_VERSION, ObservationRecord, ObservedOrMissing, ProviderSignatureRecord,
-    RawPayloadDescriptor, RetractionStatus, TenantVisibility,
+    ArtifactAttestationReading, DEPLOYMENT_ATTESTATION_PROFILE_ID,
+    DeploymentAttestationProjectionV1, DeploymentStatusReading, OBSERVATION_SCHEMA_VERSION,
+    ObservationRecord, ObservedOrMissing, ProviderSignatureRecord, RawPayloadDescriptor,
+    RetractionStatus, TenantVisibility,
 };
 
 use crate::connector::{
-    ConnectorCursor, ConnectorError, ConnectorResult, ObservationCandidate, RawSourceBatch,
-    RawSourceEvent, ReconciliationReport, SourceAuthentication, SourceConnector, SourceHealth,
-    validate_limit,
+    ConnectorCursor, ConnectorError, ConnectorResult, NormalizedObservationInput, RawSourceBatch,
+    RawSourceEvent, SourceAuthentication, SourceConnector, SourceHealth,
+    SourceReconciliationAssessment, validate_limit,
 };
 
 const FEED_SCHEMA_VERSION: u16 = 1;
@@ -291,7 +291,7 @@ impl SourceConnector for PitekaEvidenceFeedConnector {
         &self,
         raw: &RawSourceEvent,
         profile_version: u16,
-    ) -> ConnectorResult<ObservationCandidate> {
+    ) -> ConnectorResult<NormalizedObservationInput> {
         if profile_version != 1 {
             return Err(ConnectorError::UnsupportedProfile {
                 profile_id: PROFILE_ID.to_string(),
@@ -305,7 +305,7 @@ impl SourceConnector for PitekaEvidenceFeedConnector {
         manifest.validate()?;
         let observation_id = observation_id(&export);
         let deployment_profile = manifest.deployment_profile()?;
-        Ok(ObservationCandidate {
+        Ok(NormalizedObservationInput {
             observation: ObservationRecord {
                 schema_version: OBSERVATION_SCHEMA_VERSION,
                 observation_id,
@@ -354,12 +354,12 @@ impl SourceConnector for PitekaEvidenceFeedConnector {
         &self,
         subject_ref: &str,
         interval: (u64, u64),
-    ) -> ConnectorResult<ReconciliationReport> {
+    ) -> ConnectorResult<SourceReconciliationAssessment> {
         validate_text(subject_ref, "piteka_feed.subject_ref")?;
         if interval.0 > interval.1 {
             return Err(ConnectorError::InvalidField("piteka_feed.interval"));
         }
-        Ok(ReconciliationReport {
+        Ok(SourceReconciliationAssessment {
             source_id: self.source_id().to_string(),
             subject_ref: subject_ref.to_string(),
             reorgs: Vec::new(),
@@ -478,14 +478,14 @@ impl ExportManifest {
         Ok(())
     }
 
-    fn deployment_profile(&self) -> ConnectorResult<DeploymentAttestationObservationProfile> {
+    fn deployment_profile(&self) -> ConnectorResult<DeploymentAttestationProjectionV1> {
         let evidence_refs = self
             .target_evidence
             .iter()
             .map(|node| node.node_id.clone())
             .collect();
         let status_history = ObservedOrMissing::Observed {
-            value: vec![DeploymentStatusObservation {
+            value: vec![DeploymentStatusReading {
                 status: self.receipt.outcome.clone(),
                 asserted_at: self.receipt.created_at,
                 evidence_refs,
@@ -503,7 +503,7 @@ impl ExportManifest {
                 reasons: missing_reasons(&self.missing_evidence.gaps, "artifact attestation"),
             },
             [node] => ObservedOrMissing::Observed {
-                value: ArtifactAttestationObservation {
+                value: ArtifactAttestationReading {
                     digest_algorithm: "sha-256".to_string(),
                     artifact_digest: ObservedOrMissing::Missing {
                         reasons: missing_reasons(&self.missing_evidence.gaps, "artifact digest"),
@@ -519,7 +519,7 @@ impl ExportManifest {
             }
         };
 
-        Ok(DeploymentAttestationObservationProfile {
+        Ok(DeploymentAttestationProjectionV1 {
             schema_version: OBSERVATION_SCHEMA_VERSION,
             receipt_id: self.receipt.receipt_id.clone(),
             mandate_id: self.receipt.mandate_id.clone(),

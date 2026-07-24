@@ -31,7 +31,7 @@ impl Query {
         &self,
         ctx: &Context<'_>,
         observation_id: String,
-    ) -> Result<Vec<ObservationGql>> {
+    ) -> Result<Vec<ObservationProjectionV1>> {
         let gql_ctx = ctx
             .data::<GraphqlContext>()
             .map_err(|_| Error::new("API context unavailable"))?;
@@ -45,7 +45,10 @@ impl Query {
             .map_err(|error| Error::new(error.to_string()))
     }
 
-    async fn observation_source_health(&self, ctx: &Context<'_>) -> Result<Vec<SourceHealthGql>> {
+    async fn observation_source_health(
+        &self,
+        ctx: &Context<'_>,
+    ) -> Result<Vec<SourceHealthProjectionV1>> {
         let gql_ctx = ctx
             .data::<GraphqlContext>()
             .map_err(|_| Error::new("API context unavailable"))?;

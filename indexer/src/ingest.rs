@@ -63,11 +63,15 @@ fn parse_verifying_key(hex_key: &str) -> Result<[u8; 32], String> {
 /// Prerequisites are inserted idempotently so re-running against the same store
 /// does not fail; already-present observations are counted as duplicates rather
 /// than treated as errors, honoring the connector's idempotency contract.
-pub async fn ingest_piteka(pool: SqlitePool, config: IngestConfig) -> Result<IngestSummary, String> {
+pub async fn ingest_piteka(
+    pool: SqlitePool,
+    config: IngestConfig,
+) -> Result<IngestSummary, String> {
     let verifying_key = parse_verifying_key(&config.verifying_key_hex)?;
 
-    let transport = HttpPitekaFeedTransport::new(config.endpoint.clone(), config.bearer_token.clone())
-        .map_err(|error| format!("invalid feed transport: {error:?}"))?;
+    let transport =
+        HttpPitekaFeedTransport::new(config.endpoint.clone(), config.bearer_token.clone())
+            .map_err(|error| format!("invalid feed transport: {error:?}"))?;
     let connector = PitekaEvidenceFeedConnector::new(
         PitekaFeedConfig {
             source_id: config.source_id.clone(),

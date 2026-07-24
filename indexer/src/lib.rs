@@ -22,9 +22,9 @@ pub use chain_indexer::{
     AddressIndexingResult, ChainIndexer, ChainResult, LegacyChainConnectorAdapter,
 };
 pub use connector::{
-    ConnectorCursor, ConnectorError, ConnectorResult, ObservationCandidate, RawSourceBatch,
-    RawSourceEvent, ReconciliationReport, SourceAuthentication, SourceConnector, SourceHealth,
-    authenticate_and_normalize,
+    ConnectorCursor, ConnectorError, ConnectorResult, NormalizedObservationInput, RawSourceBatch,
+    RawSourceEvent, SourceAuthentication, SourceConnector, SourceHealth,
+    SourceReconciliationAssessment, authenticate_and_normalize,
 };
 pub use indexer_plugin::{IndexerPluginRegistry, IndexerPluginRegistryBuilder};
 pub use ingest::{IngestConfig, IngestSummary, ingest_piteka};

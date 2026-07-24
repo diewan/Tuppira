@@ -1,8 +1,10 @@
 /// GraphQL type mappings and input types for the Tuppira API.
 use async_graphql::*;
 
+/// Versioned consumer read model. It omits raw payload and custody details.
 #[derive(SimpleObject, Clone)]
-pub struct ObservationGql {
+#[graphql(name = "ObservationGql")]
+pub struct ObservationProjectionV1 {
     pub observation_id: String,
     pub source_id: String,
     pub source_event_id: String,
@@ -20,7 +22,7 @@ pub struct ObservationGql {
     pub visibility_scope: String,
 }
 
-impl From<tuppira_shared::ObservationRecord> for ObservationGql {
+impl From<tuppira_shared::ObservationRecord> for ObservationProjectionV1 {
     fn from(value: tuppira_shared::ObservationRecord) -> Self {
         let visibility_scope = match value.tenant_visibility {
             tuppira_shared::TenantVisibility::Public => "public",
@@ -47,8 +49,10 @@ impl From<tuppira_shared::ObservationRecord> for ObservationGql {
     }
 }
 
+/// Versioned consumer projection of collector liveness, not source truth.
 #[derive(SimpleObject, Clone)]
-pub struct SourceHealthGql {
+#[graphql(name = "SourceHealthGql")]
+pub struct SourceHealthProjectionV1 {
     pub source_id: String,
     pub connector_kind: String,
     pub display_name: String,
@@ -57,8 +61,10 @@ pub struct SourceHealthGql {
     pub cursor_observed_at: Option<i64>,
 }
 
-impl From<tuppira_storage::repositories::observations::SourceHealthRecord> for SourceHealthGql {
-    fn from(value: tuppira_storage::repositories::observations::SourceHealthRecord) -> Self {
+impl From<tuppira_storage::repositories::observations::SourceHealthProjection>
+    for SourceHealthProjectionV1
+{
+    fn from(value: tuppira_storage::repositories::observations::SourceHealthProjection) -> Self {
         Self {
             source_id: value.source_id,
             connector_kind: value.connector_kind,

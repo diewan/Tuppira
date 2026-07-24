@@ -15,7 +15,7 @@ pub struct ObservationRepository {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceHealthRecord {
+pub struct SourceHealthProjection {
     pub source_id: String,
     pub connector_kind: String,
     pub display_name: String,
@@ -200,7 +200,7 @@ impl ObservationRepository {
         Ok(records)
     }
 
-    pub async fn source_health(&self) -> Result<Vec<SourceHealthRecord>> {
+    pub async fn source_health(&self) -> Result<Vec<SourceHealthProjection>> {
         let rows = sqlx::query(
             "SELECT s.source_id, s.connector_kind, s.display_name, \
              (SELECT started_at FROM collection_runs r WHERE r.source_id = s.source_id ORDER BY started_at DESC LIMIT 1) last_run_started_at, \
@@ -209,7 +209,7 @@ impl ObservationRepository {
         ).fetch_all(&self.pool).await?;
         rows.into_iter()
             .map(|row| {
-                Ok(SourceHealthRecord {
+                Ok(SourceHealthProjection {
                     source_id: row.try_get("source_id")?,
                     connector_kind: row.try_get("connector_kind")?,
                     display_name: row.try_get("display_name")?,

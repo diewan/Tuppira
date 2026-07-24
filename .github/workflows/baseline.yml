@@ -14,6 +14,8 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
       - run: cargo test --workspace
+      - name: Check observation-plane naming contracts
+        run: cargo test -p tuppira-shared source_rename_preserves_deployment_projection_wire_shape
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo install cargo-audit --locked
       # See SECURITY_AUDIT.md: SQLx records an unused optional MySQL package
