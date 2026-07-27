@@ -15,6 +15,7 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 hex.workspace = true
+sha2.workspace = true
 getrandom = { version = "0.2", features = ["js"] }
 uuid = { version = "1.0", features = ["v4", "serde", "js"] }
 csv-protocol = { path = "../../parwana/csv-protocol" }

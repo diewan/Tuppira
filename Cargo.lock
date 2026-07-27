@@ -1062,6 +1062,7 @@ dependencies = [
  "csv-protocol",
  "csv-remote",
  "csv-runtime",
+ "csv-storage",
  "csv-verifier",
  "csv-wire",
  "hex",
@@ -1096,6 +1097,7 @@ dependencies = [
 name = "csv-verifier"
 version = "0.1.5"
 dependencies = [
+ "csv-accountability",
  "csv-codec",
  "csv-hash",
  "csv-proof",
@@ -4211,6 +4213,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "thiserror 1.0.69",
  "toml 0.8.2",

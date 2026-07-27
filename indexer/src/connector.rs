@@ -8,10 +8,13 @@ use async_trait::async_trait;
 use std::collections::HashSet;
 
 use tuppira_shared::{
-    ContradictionHintRecord, DeploymentAttestationProjectionV1, ObservationRecord,
-    ProviderSignatureRecord, RawPayloadDescriptor, ReorgRecord, SupersessionRecord,
+    CLOSURE_OBSERVATION_PROFILE_VERSION, ContradictionHintRecord,
+    DeploymentAttestationProjectionV1, ObservationRecord, ProviderSignatureRecord,
+    RawPayloadDescriptor, ReorgRecord, SOURCE_CLOSURE_OBSERVATION_PROFILE_ID, SupersessionRecord,
     TenantVisibility, TuppiraError,
 };
+
+use crate::closure_normalization::NormalizedClosureObservation;
 
 /// Maximum number of events returned by one bounded discovery call.
 pub const MAX_DISCOVERY_LIMIT: u32 = 10_000;
@@ -167,6 +170,11 @@ pub struct NormalizedObservationInput {
     pub raw_payload: Option<RawPayloadDescriptor>,
     /// Present only for the typed deployment/attestation normalization profile.
     pub deployment_profile: Option<DeploymentAttestationProjectionV1>,
+    /// Present only for the source-closure normalization profile. It carries
+    /// the projection together with the chain evidence it was derived from,
+    /// because a normalized closure separated from its evidence is an
+    /// assertion rather than an observation.
+    pub closure_observation: Option<NormalizedClosureObservation>,
 }
 
 /// Non-authoritative comparison assessment; never a source fact or verifier result.
@@ -314,6 +322,37 @@ pub async fn authenticate_and_normalize(
             return Err(ConnectorError::InvalidField("normalized profile linkage"));
         }
     }
+    if let Some(closure) = &candidate.closure_observation {
+        closure.projection.validate().map_err(|error| {
+            ConnectorError::Operation(format!("invalid closure projection: {error:?}"))
+        })?;
+        closure.evidence.validate().map_err(|error| {
+            ConnectorError::Operation(format!("invalid chain closure evidence: {error:?}"))
+        })?;
+        if candidate.observation.normalized_profile_id != SOURCE_CLOSURE_OBSERVATION_PROFILE_ID
+            || candidate.observation.normalized_profile_version
+                != CLOSURE_OBSERVATION_PROFILE_VERSION
+        {
+            return Err(ConnectorError::InvalidField("normalized profile linkage"));
+        }
+        // The observation commits to exactly one normalized payload. A closure
+        // whose bytes hash to anything else would leave that commitment
+        // pointing at a projection nobody holds.
+        let digest = closure.projection.normalized_payload_digest().map_err(|error| {
+            ConnectorError::Operation(format!("closure projection digest: {error:?}"))
+        })?;
+        if digest != candidate.observation.normalized_payload_digest {
+            return Err(ConnectorError::InvalidField("normalized closure commitment"));
+        }
+        // Evidence must address the observation and the family it belongs to,
+        // or the way back from the normalized closure leads somewhere else.
+        if closure.evidence.observation_id != candidate.observation.observation_id
+            || closure.evidence.native_event_kind
+                != closure.projection.closure_identity.closure_kind
+        {
+            return Err(ConnectorError::InvalidField("normalized evidence linkage"));
+        }
+    }
     candidate
         .observation
         .validate()
@@ -441,6 +480,7 @@ mod tests {
                 },
                 raw_payload: None,
                 deployment_profile: None,
+                closure_observation: None,
             })
         }
 
@@ -583,6 +623,230 @@ mod tests {
             Err(ConnectorError::InvalidField(
                 "normalized authenticity linkage"
             ))
+        );
+    }
+
+    // ── The closure linkage a normalized closure must satisfy (TUP-NE-003) ────
+
+    /// A connector that emits a chain closure, with each linkage independently
+    /// breakable so the boundary can be tested one failure at a time.
+    struct ClosureConnector {
+        break_commitment: bool,
+        break_evidence_target: bool,
+        break_evidence_kind: bool,
+    }
+
+    impl ClosureConnector {
+        fn intact() -> Self {
+            Self {
+                break_commitment: false,
+                break_evidence_target: false,
+                break_evidence_kind: false,
+            }
+        }
+    }
+
+    fn chain_closure_reading() -> crate::closure_normalization::ChainClosureEventReading {
+        use crate::closure_normalization::{ChainClosureEventReading, NativeClosureEventReading};
+        use tuppira_shared::{
+            ClosureSettlementReading, ConsumedStateReading, IndexFreshnessReading,
+            ObservedCheckpointReading, ObservedOrMissing, SourceReportedSettlement,
+        };
+        ChainClosureEventReading {
+            chain_id: "ethereum".to_string(),
+            network_id: "sepolia".to_string(),
+            native_event: NativeClosureEventReading::EvmNullifierRegistration {
+                contract_address_hex: "cc".repeat(20),
+                nullifier_hex: "dd".repeat(32),
+                transaction_hash_hex: "ee".repeat(32),
+                log_index: 3,
+            },
+            consumed_state: ConsumedStateReading {
+                transition_id_hex: "11".repeat(31) + "ab",
+                output_index: 0,
+                state_type: 1,
+            },
+            successor_commitment_hex: "22".repeat(31) + "cd",
+            successor_output_refs: vec!["output:0".to_string()],
+            observed_checkpoint: ObservedOrMissing::Observed {
+                value: ObservedCheckpointReading {
+                    block_height: 900,
+                    block_id_hex: "abcdef01".to_string(),
+                },
+            },
+            settlement: ObservedOrMissing::Observed {
+                value: ClosureSettlementReading {
+                    finality_policy: "confirmations".to_string(),
+                    observed_depth: 64,
+                    required_depth: 12,
+                    reported_settlement: SourceReportedSettlement::Final,
+                },
+            },
+            revocation: ObservedOrMissing::Missing {
+                reasons: vec!["source exposes no retraction feed".to_string()],
+            },
+            index_freshness: IndexFreshnessReading {
+                indexed_tip_height: 1_000,
+                indexed_tip_block_id_hex: "beef".to_string(),
+                indexed_tip_observed_at: 1_760_000_100,
+                lag_blocks: ObservedOrMissing::Observed { value: 100 },
+            },
+            raw_event_digest: [6; 32],
+        }
+    }
+
+    #[async_trait]
+    impl SourceConnector for ClosureConnector {
+        fn source_id(&self) -> &str {
+            "source:fixture"
+        }
+
+        async fn discover(
+            &self,
+            _cursor: Option<&ConnectorCursor>,
+            limit: u32,
+        ) -> ConnectorResult<RawSourceBatch> {
+            validate_limit(limit)?;
+            Err(ConnectorError::Operation("discovery not exercised".into()))
+        }
+
+        async fn authenticate(
+            &self,
+            _raw_event: &RawSourceEvent,
+        ) -> ConnectorResult<SourceAuthentication> {
+            Ok(SourceAuthentication::Authenticated {
+                material: vec![authentication_material()],
+            })
+        }
+
+        fn normalize(
+            &self,
+            raw_event: &RawSourceEvent,
+            profile_version: u16,
+        ) -> ConnectorResult<NormalizedObservationInput> {
+            let observation_id = "observation:closure:1".to_string();
+            let mut closure = crate::closure_normalization::normalize_chain_closure_event(
+                &observation_id,
+                &chain_closure_reading(),
+            )
+            .map_err(|error| ConnectorError::Operation(error.to_string()))?;
+            let digest = closure
+                .projection
+                .normalized_payload_digest()
+                .map_err(|error| ConnectorError::Operation(format!("{error:?}")))?;
+            if self.break_evidence_target {
+                closure.evidence.observation_id = "observation:someone-else".to_string();
+            }
+            if self.break_evidence_kind {
+                closure.evidence.native_event_kind = "bitcoin-outpoint-spend".to_string();
+            }
+            Ok(NormalizedObservationInput {
+                observation: ObservationRecord {
+                    schema_version: OBSERVATION_SCHEMA_VERSION,
+                    observation_id,
+                    source_id: raw_event.source_id.clone(),
+                    source_event_id: raw_event.source_event_id.clone(),
+                    source_event_type: "chain.closure".to_string(),
+                    subject_refs: vec!["sanad:1".to_string()],
+                    asserted_event_time: None,
+                    observed_at: raw_event.observed_at,
+                    normalized_profile_id: SOURCE_CLOSURE_OBSERVATION_PROFILE_ID.to_string(),
+                    normalized_profile_version: profile_version,
+                    normalized_payload_digest: if self.break_commitment {
+                        [7; 32]
+                    } else {
+                        digest
+                    },
+                    raw_payload_digest: Some([8; 32]),
+                    authenticity_material_refs: vec!["auth:fixture:1".to_string()],
+                    collection_run_id: "run:fixture:1".to_string(),
+                    supersedes: None,
+                    retraction_status: RetractionStatus::Active,
+                    tenant_visibility: raw_event.tenant_visibility.clone(),
+                },
+                raw_payload: None,
+                deployment_profile: None,
+                closure_observation: Some(closure),
+            })
+        }
+
+        fn checkpoint(&self, batch: &RawSourceBatch) -> ConnectorResult<ConnectorCursor> {
+            batch.validate(MAX_DISCOVERY_LIMIT)?;
+            Ok(batch.proposed_cursor.clone())
+        }
+
+        async fn reconcile(
+            &self,
+            subject_ref: &str,
+            _interval: (u64, u64),
+        ) -> ConnectorResult<SourceReconciliationAssessment> {
+            Ok(SourceReconciliationAssessment {
+                source_id: self.source_id().to_string(),
+                subject_ref: subject_ref.to_string(),
+                reorgs: Vec::new(),
+                supersessions: Vec::new(),
+                contradictions: Vec::new(),
+            })
+        }
+
+        async fn health(&self) -> SourceHealth {
+            SourceHealth::Healthy
+        }
+    }
+
+    #[tokio::test]
+    async fn a_normalized_chain_closure_passes_the_boundary_with_its_evidence() {
+        let candidate =
+            authenticate_and_normalize(&ClosureConnector::intact(), &raw_event(), 1).await;
+
+        let Ok(candidate) = candidate else {
+            panic!("an intact chain closure must pass the connector boundary");
+        };
+        let Some(closure) = candidate.closure_observation else {
+            panic!("the closure must survive the boundary");
+        };
+        assert_eq!(closure.evidence.observation_id, "observation:closure:1");
+        assert_eq!(
+            candidate.observation.normalized_profile_id,
+            SOURCE_CLOSURE_OBSERVATION_PROFILE_ID
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closure_the_observation_did_not_commit_to_is_rejected() {
+        let connector = ClosureConnector {
+            break_commitment: true,
+            ..ClosureConnector::intact()
+        };
+        assert_eq!(
+            authenticate_and_normalize(&connector, &raw_event(), 1).await,
+            Err(ConnectorError::InvalidField("normalized closure commitment"))
+        );
+    }
+
+    #[tokio::test]
+    async fn evidence_pointing_at_another_observation_is_rejected() {
+        let connector = ClosureConnector {
+            break_evidence_target: true,
+            ..ClosureConnector::intact()
+        };
+        assert_eq!(
+            authenticate_and_normalize(&connector, &raw_event(), 1).await,
+            Err(ConnectorError::InvalidField("normalized evidence linkage"))
+        );
+    }
+
+    #[tokio::test]
+    async fn evidence_from_the_wrong_chain_family_is_rejected() {
+        // Bitcoin locators filed against an EVM nullifier would send a reader
+        // back to a chain the closure never happened on.
+        let connector = ClosureConnector {
+            break_evidence_kind: true,
+            ..ClosureConnector::intact()
+        };
+        assert_eq!(
+            authenticate_and_normalize(&connector, &raw_event(), 1).await,
+            Err(ConnectorError::InvalidField("normalized evidence linkage"))
         );
     }
 

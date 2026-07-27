@@ -45,6 +45,76 @@ impl Query {
             .map_err(|error| Error::new(error.to_string()))
     }
 
+    /// The V2 closure account for one subject.
+    ///
+    /// A subject with no recorded closure observation reports generation
+    /// `pre_closure` and the single state `unknown`. That is the honest answer
+    /// for every Sanad, transfer, and seal indexed before the closure profile,
+    /// and it is never synthesised from the V1 explorer status.
+    async fn subject_closure(
+        &self,
+        ctx: &Context<'_>,
+        subject_ref: String,
+    ) -> Result<SubjectClosureProjectionV1Gql> {
+        let gql_ctx = ctx
+            .data::<GraphqlContext>()
+            .map_err(|_| Error::new("API context unavailable"))?;
+        let access = ctx
+            .data::<crate::access::ObservationAccess>()
+            .map_err(|_| Error::new("observation authentication required"))?;
+        ObservationRepository::new(gql_ctx.pool.clone())
+            .subject_closure(&subject_ref, &access.tenant_id)
+            .await
+            .map(Into::into)
+            .map_err(|error| Error::new(error.to_string()))
+    }
+
+    /// The closure projection carried by one observation.
+    ///
+    /// An observation without one is an error rather than an empty closure: a
+    /// caller must not receive a value shaped like a closure statement when
+    /// none was recorded.
+    async fn closure_observation(
+        &self,
+        ctx: &Context<'_>,
+        observation_id: String,
+    ) -> Result<ClosureObservationProjectionV1> {
+        let gql_ctx = ctx
+            .data::<GraphqlContext>()
+            .map_err(|_| Error::new("API context unavailable"))?;
+        let access = ctx
+            .data::<crate::access::ObservationAccess>()
+            .map_err(|_| Error::new("observation authentication required"))?;
+        let repository = ObservationRepository::new(gql_ctx.pool.clone());
+        let record = repository
+            .get_visible_observation(&observation_id, &access.tenant_id)
+            .await
+            .map_err(|error| Error::new(error.to_string()))?;
+        let projection = repository
+            .closure_observation(&observation_id, &access.tenant_id)
+            .await
+            .map_err(|error| Error::new(error.to_string()))?;
+        // The way back to the chain event, when the closure came from one.
+        let chain_evidence = match repository
+            .closure_evidence(&observation_id, &access.tenant_id)
+            .await
+        {
+            Ok(evidence) => Some(evidence.into()),
+            Err(tuppira_shared::TuppiraError::NotFound { .. }) => None,
+            Err(error) => return Err(Error::new(error.to_string())),
+        };
+        let mut view: ClosureObservationProjectionV1 =
+            tuppira_shared::RecordedSourceClosureObservationV1 {
+                observation_id,
+                observed_at: record.observed_at,
+                record_retraction_status: record.retraction_status,
+                projection,
+            }
+            .into();
+        view.chain_evidence = chain_evidence;
+        Ok(view)
+    }
+
     async fn observation_source_health(
         &self,
         ctx: &Context<'_>,
@@ -671,5 +741,86 @@ mod tests {
         let schema_text = schema.sdl();
         assert!(!schema_text.contains("rawPayload"));
         assert!(!schema_text.contains("custodyLocator"));
+    }
+
+    // ── V2 closure reads are added beside V1, not folded into it (TUP-NE-002) ─
+
+    /// The pre-existing observation read model must be untouched. A closure
+    /// field appearing on `ObservationGql` would give every consumer of that
+    /// type a closure answer it never asked for — and for pre-migration records
+    /// that answer could only be fabricated.
+    #[tokio::test]
+    async fn the_v1_observation_read_model_gains_no_closure_field() {
+        let schema = Schema::build(Query, Mutation, Subscription).finish();
+        let sdl = schema.sdl();
+        let Some(start) = sdl.find("type ObservationGql {") else {
+            panic!("the V1 observation read model must still exist");
+        };
+        let body = &sdl[start..];
+        let Some(end) = body.find("\n}") else {
+            panic!("malformed SDL for ObservationGql");
+        };
+        let body = &body[..end];
+
+        assert!(!body.to_ascii_lowercase().contains("closure"));
+        // The closure read models exist, separately and each naming its profile.
+        assert!(sdl.contains("type ClosureObservationGql {"));
+        assert!(sdl.contains("type SubjectClosureGql {"));
+        assert!(sdl.contains("subjectClosure("));
+    }
+
+    /// A subject with no recorded closure observation must report `pre_closure`
+    /// and `unknown` — not an empty V2 generation, and not silence.
+    #[tokio::test]
+    async fn a_subject_without_closure_evidence_reports_pre_closure_over_graphql() {
+        let Ok(pool) = tuppira_storage::init_pool("sqlite::memory:", 1).await else {
+            return;
+        };
+        let Ok(feed) = crate::feed::WalletFeedHub::from_pool(pool.clone()).await else {
+            return;
+        };
+        let schema = create_schema(GraphqlContext { pool, feed }, true);
+        let response = schema
+            .execute(
+                async_graphql::Request::new(
+                    "{ subjectClosure(subjectRef: \"sanad:legacy\") \
+                     { generation preClosureReasons establishedStates observations { observationId } } }",
+                )
+                .data(crate::access::ObservationAccess {
+                    tenant_id: "tenant:acme".to_string(),
+                }),
+            )
+            .await;
+
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let account = &response.data.into_json().unwrap_or_default()["subjectClosure"];
+        assert_eq!(account["generation"], "pre_closure");
+        assert_eq!(account["establishedStates"], serde_json::json!(["unknown"]));
+        assert_eq!(account["observations"], serde_json::json!([]));
+        assert!(
+            account["preClosureReasons"]
+                .as_array()
+                .is_some_and(|reasons| !reasons.is_empty()),
+            "absence must say why"
+        );
+    }
+
+    #[tokio::test]
+    async fn closure_queries_require_authentication() {
+        let Ok(pool) = tuppira_storage::init_pool("sqlite::memory:", 1).await else {
+            return;
+        };
+        let Ok(feed) = crate::feed::WalletFeedHub::from_pool(pool.clone()).await else {
+            return;
+        };
+        let schema = create_schema(GraphqlContext { pool, feed }, true);
+        for operation in [
+            "{ subjectClosure(subjectRef: \"sanad:1\") { generation } }",
+            "{ closureObservation(observationId: \"obs:1\") { observationId } }",
+        ] {
+            let denied = schema.execute(operation).await;
+            assert_eq!(denied.errors.len(), 1);
+            assert!(denied.errors[0].message.contains("authentication required"));
+        }
     }
 }

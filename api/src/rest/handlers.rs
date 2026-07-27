@@ -224,6 +224,89 @@ pub async fn observation_list(
     Ok(Json(ApiResponse::from(data)))
 }
 
+// ---------------------------------------------------------------------------
+// V2 source-closure reads (TUP-NE-002)
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/observations/:id/closure.
+///
+/// The closure statement one observation carries, in the profile's own
+/// versioned wire shape. `profile_id` and `profile_version` name that shape, so
+/// a consumer that does not understand it rejects the payload instead of
+/// reading it under this release's rules.
+pub async fn observation_closure(
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    State((_, pool, _, _)): State<AppState>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
+    let access = crate::access::authenticate(&headers).map_err(auth_error)?;
+    let repository = ObservationRepository::new(pool);
+    let record = repository
+        .get_visible_observation(&id, &access.tenant_id)
+        .await
+        .map_err(tuppira_error)?;
+    let projection = repository
+        .closure_observation(&id, &access.tenant_id)
+        .await
+        .map_err(tuppira_error)?;
+    // The way back to the chain event, when the closure came from one. A
+    // closure relayed by a non-chain source has none, and that reads as an
+    // explicit absence rather than an empty evidence object.
+    let chain_evidence = match repository.closure_evidence(&id, &access.tenant_id).await {
+        Ok(evidence) => serde_json::json!(evidence),
+        Err(tuppira_shared::TuppiraError::NotFound { .. }) => serde_json::json!({
+            "availability": "missing",
+            "reasons": ["no chain evidence is recorded for this closure observation"]
+        }),
+        Err(error) => return Err(tuppira_error(error)),
+    };
+    Ok(Json(ApiResponse::from(serde_json::json!({
+        "observation_id": id,
+        "observed_at": record.observed_at,
+        // The collector withdrawing the record and the source withdrawing the
+        // closure are different events; the second lives inside `payload`.
+        "record_retraction_status": format!("{:?}", record.retraction_status).to_lowercase(),
+        "profile_id": tuppira_shared::SOURCE_CLOSURE_OBSERVATION_PROFILE_ID,
+        "profile_version": projection.schema_version,
+        "established_states": projection.established_states(),
+        "payload": projection,
+        "chain_evidence": chain_evidence
+    }))))
+}
+
+/// Subject selector for the closure account.
+#[derive(Deserialize)]
+pub struct SubjectClosureQuery {
+    /// The subject reference as observations carry it, such as `sanad:42`.
+    pub subject_ref: String,
+}
+
+/// GET /api/v1/closure-observations?subject_ref=…
+///
+/// The closure account for one subject. A subject with no recorded closure
+/// observation returns generation `pre_closure` with the reasons it is absent
+/// and the single state `unknown` — never a closure derived from a V1 explorer
+/// status such as a Sanad's stored `spent`.
+pub async fn subject_closure(
+    headers: HeaderMap,
+    Query(query): Query<SubjectClosureQuery>,
+    State((_, pool, _, _)): State<AppState>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
+    let access = crate::access::authenticate(&headers).map_err(auth_error)?;
+    let account = ObservationRepository::new(pool)
+        .subject_closure(&query.subject_ref, &access.tenant_id)
+        .await
+        .map_err(tuppira_error)?;
+    let established_states = account.established_states();
+    Ok(Json(ApiResponse::from(serde_json::json!({
+        "profile_id": tuppira_shared::SUBJECT_CLOSURE_PROJECTION_PROFILE_ID,
+        "schema_version": account.schema_version,
+        "subject_ref": account.subject_ref,
+        "closure_generation": account.closure_generation,
+        "established_states": established_states
+    }))))
+}
+
 fn auth_error(status: StatusCode) -> (StatusCode, Json<ErrorResponse>) {
     let message = if status == StatusCode::SERVICE_UNAVAILABLE {
         "observation authentication is not configured"

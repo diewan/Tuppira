@@ -21,6 +21,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
         5,
         include_str!("../migrations/0005_accountable_entities.sql"),
     ),
+    (
+        6,
+        include_str!("../migrations/0006_closure_observations.sql"),
+    ),
+    (
+        7,
+        include_str!("../migrations/0007_closure_chain_evidence.sql"),
+    ),
 ];
 
 /// Initialize the database connection pool and apply schema.
@@ -113,7 +121,7 @@ mod tests {
             sqlx::query_scalar("SELECT COUNT(*) FROM _tuppira_migrations")
                 .fetch_one(&pool)
                 .await;
-        assert!(matches!(count, Ok(5)));
+        assert!(matches!(count, Ok(7)));
         let observation_tables: Result<i64, sqlx::Error> = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('observations', 'raw_payload_descriptors', 'collection_runs', 'sync_cursors', 'supersessions')",
         ).fetch_one(&pool).await;
@@ -122,6 +130,10 @@ mod tests {
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('source_reorgs', 'contradiction_hints')",
         ).fetch_one(&pool).await;
         assert!(matches!(reconciliation_tables, Ok(2)));
+        let closure_tables: Result<i64, sqlx::Error> = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('closure_observations', 'closure_observation_evidence', 'closure_observation_evidence_refs')",
+        ).fetch_one(&pool).await;
+        assert!(matches!(closure_tables, Ok(3)));
 
         // Re-opening the same pool proves the migration ledger is idempotent.
         let reapplied = super::apply_migrations(&pool).await;
@@ -130,7 +142,75 @@ mod tests {
             sqlx::query_scalar("SELECT COUNT(*) FROM _tuppira_migrations")
                 .fetch_one(&pool)
                 .await;
-        assert!(matches!(count, Ok(5)));
+        assert!(matches!(count, Ok(7)));
+    }
+
+    /// The V1 explorer read model must survive the closure migration untouched:
+    /// a Sanad written before it keeps every column, and `status = 'spent'`
+    /// still means what it meant — a chain-level spend the indexer saw, not a
+    /// V2 protocol closure.
+    #[tokio::test]
+    async fn the_closure_migration_leaves_pre_migration_history_intact() {
+        let Ok(pool) = sqlx::SqlitePool::connect("sqlite::memory:").await else {
+            return;
+        };
+        // Apply every migration up to but excluding the closure migration, then
+        // write history the way a pre-closure release would have.
+        assert!(
+            sqlx::query(
+                "CREATE TABLE _tuppira_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+            )
+            .execute(&pool)
+            .await
+            .is_ok()
+        );
+        for (version, sql) in &super::MIGRATIONS[..5] {
+            assert!(sqlx::raw_sql(sql).execute(&pool).await.is_ok());
+            assert!(
+                sqlx::query("INSERT INTO _tuppira_migrations (version) VALUES (?)")
+                    .bind(version)
+                    .execute(&pool)
+                    .await
+                    .is_ok()
+            );
+        }
+        for statement in [
+            "INSERT INTO sanads (id, chain, seal_ref, commitment, owner, created_at, created_tx, status, transfer_count) \
+             VALUES ('sanad:legacy', 'ethereum', 'seal:1', 'commit:1', 'owner:1', 1, 'tx:1', 'spent', 2)",
+            "INSERT INTO transfers (id, sanad_id, from_chain, to_chain, from_owner, to_owner, lock_tx, status, created_at) \
+             VALUES ('transfer:legacy', 'sanad:legacy', 'ethereum', 'sui', 'owner:1', 'owner:2', 'tx:lock', 'completed', 2)",
+            "INSERT INTO seals (id, chain, seal_type, seal_ref, sanad_id, status, consumed_tx, block_height) \
+             VALUES ('seal:legacy', 'ethereum', 'utxo', 'seal:1', 'sanad:legacy', 'consumed', 'tx:consume', 900)",
+        ] {
+            assert!(sqlx::query(statement).execute(&pool).await.is_ok());
+        }
+
+        assert!(super::apply_migrations(&pool).await.is_ok());
+
+        let sanad: Result<(String, String, i64), sqlx::Error> =
+            sqlx::query_as("SELECT status, created_tx, transfer_count FROM sanads WHERE id = 'sanad:legacy'")
+                .fetch_one(&pool)
+                .await;
+        assert_eq!(sanad.ok(), Some(("spent".into(), "tx:1".into(), 2)));
+        let transfer: Result<(String, String), sqlx::Error> =
+            sqlx::query_as("SELECT status, lock_tx FROM transfers WHERE id = 'transfer:legacy'")
+                .fetch_one(&pool)
+                .await;
+        assert_eq!(transfer.ok(), Some(("completed".into(), "tx:lock".into())));
+        let seal: Result<(String, String, i64), sqlx::Error> =
+            sqlx::query_as("SELECT status, consumed_tx, block_height FROM seals WHERE id = 'seal:legacy'")
+                .fetch_one(&pool)
+                .await;
+        assert_eq!(
+            seal.ok(),
+            Some(("consumed".into(), "tx:consume".into(), 900))
+        );
+        // The migration attaches no closure statement to that history.
+        let attached: Result<i64, sqlx::Error> =
+            sqlx::query_scalar("SELECT COUNT(*) FROM closure_observations")
+                .fetch_one(&pool)
+                .await;
+        assert!(matches!(attached, Ok(0)));
     }
 
     #[tokio::test]

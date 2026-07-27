@@ -11,8 +11,12 @@ pub mod block_explorer;
 /// Source-neutral observation-plane projections and validation.
 pub mod observation;
 
+/// Observation-plane projections of Parwana V2 source closure.
+pub mod closure_observation;
+
 // Re-export commonly used types at the crate root for convenience.
 pub use advanced_types::*;
+pub use closure_observation::*;
 pub use observation::*;
 pub use types::*;
 

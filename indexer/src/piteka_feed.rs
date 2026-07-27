@@ -342,6 +342,8 @@ impl SourceConnector for PitekaEvidenceFeedConnector {
                 retention_class_id: self.config.retention_class_id.clone(),
             }),
             deployment_profile: Some(deployment_profile),
+            // The Piteka export is a deployment attestation, not a chain closure.
+            closure_observation: None,
         })
     }
 
@@ -389,6 +391,13 @@ struct ExportManifest {
     // anchor field, and unanchored mandates, still normalize.
     #[serde(default)]
     single_use_anchor: Option<ExportSingleUseAnchor>,
+    /// Verifier conclusions Piteka held back. Manifest `0.2` only, and required
+    /// there — an absent list would be indistinguishable from "there were none".
+    #[serde(default)]
+    withheld_verifier_conclusions: Option<Vec<ExportWithheldConclusion>>,
+    /// Piteka's own collection horizon for this export. Manifest `0.2` only.
+    #[serde(default)]
+    export_checkpoint: Option<ExportCheckpoint>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -406,6 +415,18 @@ struct ExportEvidenceDescriptor {
     node_id: String,
     registry_id: String,
     source: String,
+    /// When the source says the event happened. Manifest `0.2` only.
+    ///
+    /// The double option distinguishes the three cases a single option would
+    /// merge: the field absent (a `0.1` manifest, `None`), present and null
+    /// (the source disclosed no assertion time, `Some(None)`), and present with
+    /// a value. Merging the first two would let a `0.1` manifest pass the `0.2`
+    /// checks below by saying nothing.
+    #[serde(default, deserialize_with = "deserialize_stated_option")]
+    asserted_event_at: Option<Option<i64>>,
+    /// When Piteka collected it. Manifest `0.2` only.
+    #[serde(default)]
+    observed_at: Option<i64>,
     content_digest: String,
 }
 #[derive(Deserialize)]
@@ -419,7 +440,32 @@ struct ExportGapDescriptor {
 struct ExportSourceAttribution {
     piteka_claims: u64,
     provider_observations: u64,
-    verifier_conclusions: u64,
+    /// A count of verifier conclusions the export published. Manifest `0.1`
+    /// only: publishing a verdict count is a claim to authority Piteka does not
+    /// hold, and `0.2` replaced it with the withheld count below.
+    #[serde(default)]
+    verifier_conclusions: Option<u64>,
+    /// How many verifier conclusions were held back. Manifest `0.2` only.
+    #[serde(default)]
+    withheld_verifier_conclusions: Option<u64>,
+}
+
+/// A verifier conclusion the export names but deliberately does not carry.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportWithheldConclusion {
+    node_id: String,
+    content_digest: String,
+    reason: String,
+}
+
+/// How current the evidence in a `0.2` export is, in Piteka's own clock.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportCheckpoint {
+    /// Newest collection time among published evidence; null when none was.
+    evidence_collected_through: Option<i64>,
+    published_evidence_count: usize,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -435,11 +481,122 @@ struct ExportSingleUseAnchor {
     commitment_hex: String,
     anchor_backend: String,
 }
+/// Deserialize a nullable field so that "absent" and "present but null" differ.
+///
+/// Serde's own `Option<Option<T>>` collapses both onto `None`, which is exactly
+/// the distinction the version gate depends on: a `0.1` manifest omits
+/// `asserted_event_at` entirely, while a `0.2` manifest states it and may state
+/// it as null. This wrapper runs only when the key is present, so the field
+/// stays `None` when it is absent and becomes `Some(None)` when it is null.
+fn deserialize_stated_option<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i64>::deserialize(deserializer).map(Some)
+}
+
+/// Manifest version whose evidence descriptors carry no times and whose source
+/// attribution publishes a verifier-conclusion count.
+const MANIFEST_VERSION_V0_1: &str = "0.1";
+/// Manifest version that separates source, asserted time, observed time, and
+/// collection checkpoint, and withholds verifier conclusions.
+const MANIFEST_VERSION_V0_2: &str = "0.2";
+
 impl ExportManifest {
+    /// Validate the manifest under the version it declares.
+    ///
+    /// The version field decides how these bytes are read, and nothing else
+    /// does: a `0.1` manifest carrying `0.2` fields, or a `0.2` manifest missing
+    /// them, is rejected rather than read under whichever set happens to fit.
+    /// Inferring the shape from the fields present is how a payload gets decoded
+    /// under rules its producer never agreed to.
     fn validate(&self) -> ConnectorResult<()> {
-        if self.bundle_version != "0.1" || self.receipt.created_at == 0 {
+        if self.receipt.created_at == 0 {
             return Err(ConnectorError::InvalidField("piteka_feed.manifest_version"));
         }
+        match self.bundle_version.as_str() {
+            MANIFEST_VERSION_V0_1 => self.validate_v0_1_shape()?,
+            MANIFEST_VERSION_V0_2 => self.validate_v0_2_shape()?,
+            _ => return Err(ConnectorError::InvalidField("piteka_feed.manifest_version")),
+        }
+        self.validate_common()
+    }
+
+    /// A `0.1` manifest must carry none of the `0.2` fields.
+    fn validate_v0_1_shape(&self) -> ConnectorResult<()> {
+        let has_v0_2_fields = self.withheld_verifier_conclusions.is_some()
+            || self.export_checkpoint.is_some()
+            || self.source_attribution.withheld_verifier_conclusions.is_some()
+            || self
+                .dispatch_evidence
+                .iter()
+                .chain(&self.target_evidence)
+                .any(|node| node.asserted_event_at.is_some() || node.observed_at.is_some());
+        if has_v0_2_fields || self.source_attribution.verifier_conclusions.is_none() {
+            return Err(ConnectorError::InvalidField("piteka_feed.manifest_version"));
+        }
+        Ok(())
+    }
+
+    /// A `0.2` manifest must carry all of them, and none of the `0.1` fields.
+    fn validate_v0_2_shape(&self) -> ConnectorResult<()> {
+        if self.source_attribution.verifier_conclusions.is_some() {
+            return Err(ConnectorError::InvalidField("piteka_feed.manifest_version"));
+        }
+        let (Some(withheld), Some(checkpoint), Some(withheld_count)) = (
+            self.withheld_verifier_conclusions.as_ref(),
+            self.export_checkpoint.as_ref(),
+            self.source_attribution.withheld_verifier_conclusions,
+        ) else {
+            return Err(ConnectorError::InvalidField("piteka_feed.manifest_version"));
+        };
+        if withheld_count as usize != withheld.len() {
+            return Err(ConnectorError::InvalidField("piteka_feed.withheld_count"));
+        }
+        for conclusion in withheld {
+            validate_text(&conclusion.node_id, "withheld.node_id")?;
+            // Withholding without a stated reason is indistinguishable from an
+            // unexplained omission.
+            validate_text(&conclusion.reason, "withheld.reason")?;
+            decode_sha256(&conclusion.content_digest)?;
+        }
+
+        let published: Vec<&ExportEvidenceDescriptor> = self
+            .dispatch_evidence
+            .iter()
+            .chain(&self.target_evidence)
+            .collect();
+        if checkpoint.published_evidence_count != published.len() {
+            return Err(ConnectorError::InvalidField("piteka_feed.checkpoint_count"));
+        }
+        let mut latest: Option<i64> = None;
+        for node in &published {
+            // A verifier conclusion published as ordinary evidence would carry a
+            // verdict into the observation plane under Piteka's signature.
+            if node.source == "verifier" {
+                return Err(ConnectorError::InvalidField(
+                    "piteka_feed.published_verifier_conclusion",
+                ));
+            }
+            let (Some(asserted), Some(observed)) = (node.asserted_event_at, node.observed_at)
+            else {
+                return Err(ConnectorError::InvalidField("piteka_feed.evidence_times"));
+            };
+            if observed < 0 || asserted.is_some_and(|value| value < 0) {
+                return Err(ConnectorError::InvalidField("piteka_feed.evidence_times"));
+            }
+            latest = Some(latest.map_or(observed, |current| current.max(observed)));
+        }
+        // The checkpoint is Piteka's collection horizon, so it must be the
+        // newest collection time it published — not the receipt's asserted
+        // creation time, and not an unrelated clock.
+        if checkpoint.evidence_collected_through != latest {
+            return Err(ConnectorError::InvalidField("piteka_feed.checkpoint"));
+        }
+        Ok(())
+    }
+
+    fn validate_common(&self) -> ConnectorResult<()> {
         for (v, f) in [
             (&self.receipt.receipt_id, "receipt_id"),
             (&self.receipt.mandate_id, "mandate_id"),
@@ -467,7 +624,6 @@ impl ExportManifest {
         let _ = (
             self.source_attribution.piteka_claims,
             self.source_attribution.provider_observations,
-            self.source_attribution.verifier_conclusions,
         );
         if let Some(anchor) = &self.single_use_anchor {
             validate_text(&anchor.anchor_backend, "single_use_anchor.anchor_backend")?;
@@ -799,10 +955,12 @@ mod tests {
             node_id: id.into(),
             registry_id: ATTESTATION_REGISTRY_ID.into(),
             source: "provider".into(),
+            asserted_event_at: None,
+            observed_at: None,
             content_digest: digest.into(),
         };
         let manifest = ExportManifest {
-            bundle_version: "0.1".into(),
+            bundle_version: MANIFEST_VERSION_V0_1.into(),
             receipt: ExportReceipt {
                 receipt_id: "receipt-1".into(),
                 mandate_id: "mandate-1".into(),
@@ -820,17 +978,178 @@ mod tests {
             source_attribution: ExportSourceAttribution {
                 piteka_claims: 0,
                 provider_observations: 0,
-                verifier_conclusions: 0,
+                verifier_conclusions: Some(0),
+                withheld_verifier_conclusions: None,
             },
             missing_evidence: ExportMissingEvidence {
                 gap_count: 0,
                 gaps: Vec::new(),
             },
             single_use_anchor: None,
+            withheld_verifier_conclusions: None,
+            export_checkpoint: None,
         };
         assert!(manifest.deployment_profile().is_err());
 
         let malformed = descriptor("attestation-1", "00");
         assert!(decode_sha256(&malformed.content_digest).is_err());
+    }
+
+    // ── The 0.2 feed contract Piteka now produces (PIT-NE-006) ────────────────
+
+    /// A `0.2` manifest as Piteka's exporter renders it, as JSON so the test
+    /// exercises the same deserialization path the connector uses.
+    fn manifest_v0_2() -> serde_json::Value {
+        serde_json::json!({
+            "single_use_anchor": null,
+            "bundle_version": "0.2",
+            "receipt": {
+                "receipt_id": "receipt-1", "mandate_id": "mandate-1",
+                "intent_id": "intent-1", "attempt_id": "attempt-1",
+                "outcome": "succeeded", "created_at": 10
+            },
+            "dispatch_evidence": [{
+                "node_id": "claim-1", "registry_id": "diewan.evidence.claim.v1",
+                "source": "piteka", "asserted_event_at": 90, "observed_at": 100,
+                "content_digest": hex::encode([1; 32])
+            }],
+            "target_evidence": [{
+                "node_id": "observed-1", "registry_id": "diewan.evidence.observation.v1",
+                "source": "github", "asserted_event_at": null, "observed_at": 140,
+                "content_digest": hex::encode([2; 32])
+            }],
+            "evidence_gaps": [],
+            "withheld_verifier_conclusions": [{
+                "node_id": "verdict-1", "content_digest": hex::encode([3; 32]),
+                "reason": "verifier conclusions are not published by the evidence feed"
+            }],
+            "source_attribution": {
+                "piteka_claims": 1, "provider_observations": 1,
+                "withheld_verifier_conclusions": 1
+            },
+            "export_checkpoint": {
+                "evidence_collected_through": 140, "published_evidence_count": 2
+            },
+            "missing_evidence": { "gap_count": 0, "gaps": [] }
+        })
+    }
+
+    fn validate_manifest(value: serde_json::Value) -> ConnectorResult<()> {
+        let manifest: ExportManifest = serde_json::from_value(value)
+            .map_err(|_| ConnectorError::InvalidField("piteka_feed.payload"))?;
+        manifest.validate()
+    }
+
+    #[test]
+    fn accepts_the_manifest_version_that_separates_source_times_and_checkpoint() {
+        assert_eq!(validate_manifest(manifest_v0_2()), Ok(()));
+    }
+
+    #[test]
+    fn a_published_verifier_conclusion_is_refused_at_the_boundary() {
+        // Piteka's exporter withholds these. The consumer refuses them too, so
+        // a feed that regressed could not carry a verdict into this plane.
+        let mut manifest = manifest_v0_2();
+        manifest["target_evidence"][0]["source"] = serde_json::json!("verifier");
+        assert_eq!(
+            validate_manifest(manifest),
+            Err(ConnectorError::InvalidField(
+                "piteka_feed.published_verifier_conclusion"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_withheld_conclusion_must_be_counted_and_explained() {
+        let mut missing_reason = manifest_v0_2();
+        missing_reason["withheld_verifier_conclusions"][0]["reason"] = serde_json::json!("");
+        assert!(validate_manifest(missing_reason).is_err());
+
+        let mut miscounted = manifest_v0_2();
+        miscounted["source_attribution"]["withheld_verifier_conclusions"] = serde_json::json!(0);
+        assert_eq!(
+            validate_manifest(miscounted),
+            Err(ConnectorError::InvalidField("piteka_feed.withheld_count"))
+        );
+    }
+
+    #[test]
+    fn evidence_must_state_both_times_separately() {
+        let mut manifest = manifest_v0_2();
+        manifest["dispatch_evidence"][0]
+            .as_object_mut()
+            .expect("object")
+            .remove("asserted_event_at");
+        assert_eq!(
+            validate_manifest(manifest),
+            Err(ConnectorError::InvalidField("piteka_feed.evidence_times"))
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_that_is_not_the_collection_horizon_is_rejected() {
+        // The receipt's asserted `created_at` is not Piteka's collection
+        // horizon; passing it off as one is the collapse this check prevents.
+        let mut manifest = manifest_v0_2();
+        manifest["export_checkpoint"]["evidence_collected_through"] = serde_json::json!(10);
+        assert_eq!(
+            validate_manifest(manifest),
+            Err(ConnectorError::InvalidField("piteka_feed.checkpoint"))
+        );
+    }
+
+    #[test]
+    fn a_version_is_never_inferred_from_the_fields_that_happen_to_be_present() {
+        // 0.2 fields under a 0.1 banner, and a 0.2 banner missing them: both
+        // are refused rather than read under whichever set fits.
+        let mut mislabelled = manifest_v0_2();
+        mislabelled["bundle_version"] = serde_json::json!("0.1");
+        assert_eq!(
+            validate_manifest(mislabelled),
+            Err(ConnectorError::InvalidField("piteka_feed.manifest_version"))
+        );
+
+        let mut incomplete = manifest_v0_2();
+        incomplete
+            .as_object_mut()
+            .expect("object")
+            .remove("export_checkpoint");
+        assert_eq!(
+            validate_manifest(incomplete),
+            Err(ConnectorError::InvalidField("piteka_feed.manifest_version"))
+        );
+
+        let mut unknown = manifest_v0_2();
+        unknown["bundle_version"] = serde_json::json!("0.3");
+        assert_eq!(
+            validate_manifest(unknown),
+            Err(ConnectorError::InvalidField("piteka_feed.manifest_version"))
+        );
+    }
+
+    #[test]
+    fn the_previous_manifest_version_still_decodes_under_its_own_rules() {
+        // Read support is never rolled back: an export produced before the
+        // upgrade must keep normalizing while the two sides deploy in order.
+        let legacy = serde_json::json!({
+            "single_use_anchor": null,
+            "bundle_version": "0.1",
+            "receipt": {
+                "receipt_id": "receipt-1", "mandate_id": "mandate-1",
+                "intent_id": "intent-1", "attempt_id": "attempt-1",
+                "outcome": "succeeded", "created_at": 10
+            },
+            "dispatch_evidence": [{
+                "node_id": "claim-1", "registry_id": "diewan.evidence.claim.v1",
+                "source": "piteka", "content_digest": hex::encode([1; 32])
+            }],
+            "target_evidence": [],
+            "evidence_gaps": [],
+            "source_attribution": {
+                "piteka_claims": 1, "provider_observations": 0, "verifier_conclusions": 0
+            },
+            "missing_evidence": { "gap_count": 0, "gaps": [] }
+        });
+        assert_eq!(validate_manifest(legacy), Ok(()));
     }
 }

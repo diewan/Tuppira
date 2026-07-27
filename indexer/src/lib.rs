@@ -5,6 +5,7 @@
 pub mod aptos;
 pub mod bitcoin;
 pub mod chain_indexer;
+pub mod closure_normalization;
 pub mod connector;
 pub mod ethereum;
 pub mod indexer_plugin;
@@ -20,6 +21,10 @@ pub mod wallet_bridge;
 
 pub use chain_indexer::{
     AddressIndexingResult, ChainIndexer, ChainResult, LegacyChainConnectorAdapter,
+};
+pub use closure_normalization::{
+    ChainClosureEventReading, ClosureNormalizationError, NativeClosureEventReading,
+    NormalizedClosureObservation, normalize_chain_closure_event,
 };
 pub use connector::{
     ConnectorCursor, ConnectorError, ConnectorResult, NormalizedObservationInput, RawSourceBatch,

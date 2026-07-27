@@ -75,6 +75,162 @@ impl From<tuppira_storage::repositories::observations::SourceHealthProjection>
         }
     }
 }
+// ---------------------------------------------------------------------------
+// V2 source-closure read models (TUP-NE-002)
+// ---------------------------------------------------------------------------
+
+/// Versioned consumer read model for one recorded source-closure observation.
+///
+/// The typed fields are query keys. The closure statement itself is `payload`,
+/// carried in the profile's own versioned wire shape and named by `profile_id`
+/// and `profile_version`. Re-typing every facet here would create a second
+/// definition of the projection that could drift from the one the observation's
+/// digest commits to, and a drifted copy is exactly how an indeterminate facet
+/// turns into an apparent pass.
+#[derive(SimpleObject, Clone)]
+#[graphql(name = "ClosureObservationGql")]
+pub struct ClosureObservationProjectionV1 {
+    pub observation_id: String,
+    pub observed_at: i64,
+    /// Retraction of the observation *record* — the collector withdrew it.
+    /// Distinct from the source revoking the closure, which is inside `payload`.
+    pub record_retraction_status: String,
+    pub profile_id: String,
+    pub profile_version: i32,
+    pub chain_id: String,
+    pub network_id: String,
+    pub closure_kind: String,
+    pub closure_identity_hex: String,
+    pub consumed_transition_id_hex: String,
+    pub consumed_output_index: i64,
+    pub successor_commitment_hex: String,
+    /// Every state this one observation establishes, as a set and never a badge.
+    pub established_states: Vec<String>,
+    /// The projection exactly as stored, under the profile named above.
+    pub payload: JsonValueScalar,
+    /// The way back to the chain event this closure was normalized from.
+    /// Absent for a closure relayed by a source that is not a chain.
+    pub chain_evidence: Option<ChainClosureEvidenceGql>,
+}
+
+/// Chain-native locators addressing the evidence behind a normalized closure.
+#[derive(SimpleObject, Clone)]
+#[graphql(name = "ChainClosureEvidenceGql")]
+pub struct ChainClosureEvidenceGql {
+    pub schema_version: i32,
+    /// The native event family, equal to the closure's `closure_kind`.
+    pub native_event_kind: String,
+    /// Locators addressing the exact chain evidence, in the recorded order.
+    pub evidence_refs: Vec<String>,
+    /// Digest of the exact source bytes the projection was normalized from.
+    pub raw_event_digest_hex: String,
+}
+
+impl From<tuppira_shared::ChainClosureEvidenceRecord> for ChainClosureEvidenceGql {
+    fn from(value: tuppira_shared::ChainClosureEvidenceRecord) -> Self {
+        Self {
+            schema_version: i32::from(value.schema_version),
+            native_event_kind: value.native_event_kind,
+            evidence_refs: value.evidence_refs,
+            raw_event_digest_hex: hex::encode(value.raw_event_digest),
+        }
+    }
+}
+
+impl From<tuppira_shared::RecordedSourceClosureObservationV1> for ClosureObservationProjectionV1 {
+    fn from(value: tuppira_shared::RecordedSourceClosureObservationV1) -> Self {
+        let projection = value.projection;
+        Self {
+            observation_id: value.observation_id,
+            observed_at: value.observed_at as i64,
+            record_retraction_status: state_name(&value.record_retraction_status),
+            profile_id: tuppira_shared::SOURCE_CLOSURE_OBSERVATION_PROFILE_ID.to_string(),
+            profile_version: i32::from(projection.schema_version),
+            chain_id: projection.chain_id.clone(),
+            network_id: projection.network_id.clone(),
+            closure_kind: projection.closure_identity.closure_kind.clone(),
+            closure_identity_hex: projection.closure_identity.closure_identity_hex.clone(),
+            consumed_transition_id_hex: projection.consumed_state.transition_id_hex.clone(),
+            consumed_output_index: i64::from(projection.consumed_state.output_index),
+            successor_commitment_hex: projection
+                .closure_identity
+                .successor_commitment_hex
+                .clone(),
+            established_states: projection
+                .established_states()
+                .iter()
+                .map(state_name)
+                .collect(),
+            payload: JsonValueScalar(
+                serde_json::to_value(&projection).unwrap_or(JsonValue::Null),
+            ),
+            // Set by the single-observation read, which fetches evidence
+            // alongside the projection. The subject account leaves it absent
+            // and a consumer reaches it by observation identifier.
+            chain_evidence: None,
+        }
+    }
+}
+
+/// Versioned consumer read model for a subject's closure account.
+///
+/// `generation` is the discriminant a consumer branches on. `pre_closure` means
+/// no closure observation is recorded — which is what every Sanad, transfer, and
+/// seal indexed before the closure profile reports — and it carries reasons
+/// rather than an empty closure. It is never derived from a V1 explorer status.
+#[derive(SimpleObject, Clone)]
+#[graphql(name = "SubjectClosureGql")]
+pub struct SubjectClosureProjectionV1Gql {
+    pub schema_version: i32,
+    pub profile_id: String,
+    pub subject_ref: String,
+    /// `source_closure_v2` or `pre_closure`.
+    pub generation: String,
+    /// Why no closure statement exists. Empty unless `generation` is `pre_closure`.
+    pub pre_closure_reasons: Vec<String>,
+    /// Recorded observations, newest acquisition first. Empty for `pre_closure`.
+    pub observations: Vec<ClosureObservationProjectionV1>,
+    /// The union of what those observations establish; `["unknown"]` when none.
+    pub established_states: Vec<String>,
+}
+
+impl From<tuppira_shared::SubjectClosureProjectionV1> for SubjectClosureProjectionV1Gql {
+    fn from(value: tuppira_shared::SubjectClosureProjectionV1) -> Self {
+        let established_states = value.established_states().iter().map(state_name).collect();
+        let (generation, pre_closure_reasons, observations) = match value.closure_generation {
+            tuppira_shared::ClosureProfileGeneration::PreClosure { reasons } => {
+                ("pre_closure", reasons, Vec::new())
+            }
+            tuppira_shared::ClosureProfileGeneration::SourceClosureV2 { observations } => (
+                "source_closure_v2",
+                Vec::new(),
+                observations.into_iter().map(Into::into).collect(),
+            ),
+        };
+        Self {
+            schema_version: i32::from(value.schema_version),
+            profile_id: tuppira_shared::SUBJECT_CLOSURE_PROJECTION_PROFILE_ID.to_string(),
+            subject_ref: value.subject_ref,
+            generation: generation.to_string(),
+            pre_closure_reasons,
+            observations,
+            established_states,
+        }
+    }
+}
+
+/// Render an observation-plane enum using its own serde name.
+///
+/// The wire name comes from the type's `snake_case` serde attribute rather than
+/// a second table here, so a state added or renamed upstream cannot silently
+/// keep its old spelling on this boundary.
+fn state_name<T: serde::Serialize>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(JsonValue::String(name)) => name,
+        _ => "unknown".to_string(),
+    }
+}
+
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 

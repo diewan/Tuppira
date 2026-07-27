@@ -2,9 +2,13 @@
 
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use tuppira_shared::{
-    CollectionRunRecord, ContradictionHintRecord, ObservationRecord, RawPayloadDescriptor,
-    ReorgRecord, Result, RetentionClassRecord, RetractionStatus, SourceRecord, SyncCursorRecord,
-    TenantVisibility, TuppiraError,
+    CLOSURE_OBSERVATION_PROFILE_VERSION, ChainClosureEvidenceRecord, ClosureProfileGeneration,
+    CollectionRunRecord, ContradictionHintRecord, ObservationRecord, ObservedOrMissing,
+    RawPayloadDescriptor,
+    RecordedSourceClosureObservationV1, ReorgRecord, Result, RetentionClassRecord,
+    RetractionStatus, SOURCE_CLOSURE_OBSERVATION_PROFILE_ID, SUBJECT_CLOSURE_PROFILE_VERSION,
+    SourceClosureObservationProjectionV1, SourceRecord, SubjectClosureProjectionV1,
+    SyncCursorRecord, TenantVisibility, TuppiraError,
 };
 
 /// Observation-plane repository. Inserts validate at the typed boundary and
@@ -200,6 +204,216 @@ impl ObservationRepository {
         Ok(records)
     }
 
+    // ── V2 source-closure observations (TUP-NE-002) ──────────────────────────
+
+    /// Atomically append a source-closure observation, its projection payload
+    /// and the advanced cursor.
+    ///
+    /// The payload is bound to the observation by digest: an observation commits
+    /// to exactly one normalized payload, and storing bytes that hash to
+    /// anything else would leave the commitment pointing at a payload nobody
+    /// holds. Both are written in one transaction with the cursor, so a failed
+    /// cursor advance rolls the closure evidence back with it.
+    pub async fn append_closure_observation(
+        &self,
+        observation: &ObservationRecord,
+        projection: &SourceClosureObservationProjectionV1,
+        evidence: Option<&ChainClosureEvidenceRecord>,
+        cursor: &SyncCursorRecord,
+    ) -> Result<()> {
+        observation
+            .validate()
+            .map_err(|error| invalid(&format!("invalid observation: {error:?}")))?;
+        projection
+            .validate()
+            .map_err(|error| invalid(&format!("invalid closure projection: {error:?}")))?;
+        if observation.normalized_profile_id != SOURCE_CLOSURE_OBSERVATION_PROFILE_ID {
+            return Err(invalid(
+                "closure payload attached to a non-closure normalization profile",
+            ));
+        }
+        if observation.normalized_profile_version != CLOSURE_OBSERVATION_PROFILE_VERSION
+            || projection.schema_version != CLOSURE_OBSERVATION_PROFILE_VERSION
+        {
+            return Err(invalid("unsupported closure projection version"));
+        }
+        let digest = projection
+            .normalized_payload_digest()
+            .map_err(|error| invalid(&format!("closure projection digest: {error:?}")))?;
+        if digest != observation.normalized_payload_digest {
+            return Err(invalid(
+                "closure payload does not match the observation's normalized payload digest",
+            ));
+        }
+        let payload = serde_json::to_string(projection)
+            .map_err(|error| invalid(&format!("closure projection encoding: {error}")))?;
+        if let Some(evidence) = evidence {
+            evidence
+                .validate()
+                .map_err(|error| invalid(&format!("invalid chain closure evidence: {error:?}")))?;
+            // Evidence must address this observation and this closure family,
+            // or the way back from the normalized closure leads somewhere else.
+            if evidence.observation_id != observation.observation_id
+                || evidence.native_event_kind != projection.closure_identity.closure_kind
+            {
+                return Err(invalid(
+                    "chain closure evidence does not address this normalized closure",
+                ));
+            }
+        }
+        validate_cursor(cursor, &observation.source_id, observation.observed_at)?;
+
+        let mut transaction = self.pool.begin().await?;
+        insert_observation(&mut transaction, observation).await?;
+        insert_closure_projection(&mut transaction, &observation.observation_id, projection, &payload)
+            .await?;
+        if let Some(evidence) = evidence {
+            insert_closure_evidence(&mut transaction, evidence).await?;
+        }
+        upsert_cursor(&mut transaction, cursor).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// The chain evidence behind one normalized closure, tenant-filtered.
+    ///
+    /// A closure with no recorded chain evidence — one relayed by a non-chain
+    /// source, for instance — is [`TuppiraError::NotFound`] rather than an
+    /// empty evidence record: an empty way back is not a way back.
+    pub async fn closure_evidence(
+        &self,
+        observation_id: &str,
+        tenant_id: &str,
+    ) -> Result<ChainClosureEvidenceRecord> {
+        self.get_visible_observation(observation_id, tenant_id)
+            .await?;
+        let row = sqlx::query(
+            "SELECT schema_version, native_event_kind, raw_event_digest \
+             FROM closure_observation_evidence WHERE observation_id = ?",
+        )
+        .bind(observation_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| TuppiraError::NotFound {
+            entity_type: "closure_chain_evidence".into(),
+            id: observation_id.into(),
+        })?;
+        let evidence_refs = sqlx::query_scalar::<_, String>(
+            "SELECT evidence_ref FROM closure_observation_evidence_refs \
+             WHERE observation_id = ? ORDER BY ordinal",
+        )
+        .bind(observation_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let record = ChainClosureEvidenceRecord {
+            schema_version: to_u16(row.try_get("schema_version")?, "schema_version")?,
+            observation_id: observation_id.to_string(),
+            native_event_kind: row.try_get("native_event_kind")?,
+            evidence_refs,
+            raw_event_digest: digest(row.try_get("raw_event_digest")?, "raw_event_digest")?,
+        };
+        record
+            .validate()
+            .map_err(|error| invalid(&format!("invalid stored chain evidence: {error:?}")))?;
+        Ok(record)
+    }
+
+    /// The closure projection carried by one observation, tenant-filtered.
+    ///
+    /// An observation without a closure payload is [`TuppiraError::NotFound`],
+    /// never an empty or default projection: a caller must not receive a value
+    /// shaped like a closure statement when none was ever recorded.
+    pub async fn closure_observation(
+        &self,
+        observation_id: &str,
+        tenant_id: &str,
+    ) -> Result<SourceClosureObservationProjectionV1> {
+        let observation = self.get_visible_observation(observation_id, tenant_id).await?;
+        let payload = sqlx::query_scalar::<_, String>(
+            "SELECT projection_json FROM closure_observations WHERE observation_id = ?",
+        )
+        .bind(observation_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| TuppiraError::NotFound {
+            entity_type: "closure_observation".into(),
+            id: observation_id.into(),
+        })?;
+        decode_closure_projection(&payload, &observation)
+    }
+
+    /// The closure account the observation plane holds for one subject.
+    ///
+    /// A subject with no recorded closure observation — every Sanad, transfer,
+    /// and seal indexed before the closure profile — yields
+    /// [`ClosureProfileGeneration::PreClosure`]. The V1 explorer read model is
+    /// deliberately not consulted: `sanads.status = 'spent'` is a chain-level
+    /// spend the indexer saw, and reporting it as a V2 closure would fabricate
+    /// a protocol statement no source ever made.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when a subject carries more closure observations than one
+    /// account can hold. This projection has no way to say "partial", so
+    /// returning a silently truncated set would understate a conflict; the
+    /// caller uses the paginated conflict query for such a subject instead.
+    pub async fn subject_closure(
+        &self,
+        subject_ref: &str,
+        tenant_id: &str,
+    ) -> Result<SubjectClosureProjectionV1> {
+        ensure_text(subject_ref, "subject_ref")?;
+        ensure_text(tenant_id, "tenant_id")?;
+        let rows = sqlx::query(
+            "SELECT o.observation_id, o.observed_at, o.retraction_status, o.normalized_payload_digest, \
+             c.projection_json FROM closure_observations c \
+             JOIN observations o ON o.observation_id = c.observation_id \
+             JOIN observation_subjects s ON s.observation_id = c.observation_id \
+             WHERE s.subject_ref = ? AND (o.visibility_scope = 'public' OR o.tenant_id = ?) \
+             ORDER BY o.observed_at DESC, o.observation_id DESC LIMIT ?",
+        )
+        .bind(subject_ref)
+        .bind(tenant_id)
+        .bind(i64::try_from(MAX_SUBJECT_CLOSURE_OBSERVATIONS + 1).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok(SubjectClosureProjectionV1::pre_closure(subject_ref));
+        }
+        if rows.len() > MAX_SUBJECT_CLOSURE_OBSERVATIONS {
+            return Err(invalid(
+                "subject carries more closure observations than one account can report",
+            ));
+        }
+
+        let mut observations = Vec::with_capacity(rows.len());
+        for row in rows {
+            let observation_id: String = row.try_get("observation_id")?;
+            let expected = digest(
+                row.try_get("normalized_payload_digest")?,
+                "normalized_payload_digest",
+            )?;
+            let payload: String = row.try_get("projection_json")?;
+            observations.push(RecordedSourceClosureObservationV1 {
+                observation_id,
+                observed_at: to_u64(row.try_get("observed_at")?, "observed_at")?,
+                record_retraction_status: decode_retraction(
+                    &row.try_get::<String, _>("retraction_status")?,
+                )?,
+                projection: decode_bound_closure_projection(&payload, expected)?,
+            });
+        }
+        let account = SubjectClosureProjectionV1 {
+            schema_version: SUBJECT_CLOSURE_PROFILE_VERSION,
+            subject_ref: subject_ref.to_string(),
+            closure_generation: ClosureProfileGeneration::SourceClosureV2 { observations },
+        };
+        account
+            .validate()
+            .map_err(|error| invalid(&format!("invalid subject closure account: {error:?}")))?;
+        Ok(account)
+    }
+
     pub async fn source_health(&self) -> Result<Vec<SourceHealthProjection>> {
         let rows = sqlx::query(
             "SELECT s.source_id, s.connector_kind, s.display_name, \
@@ -302,8 +516,121 @@ impl ObservationRepository {
     }
 }
 
+/// Closure observations one subject account can report without truncating.
+///
+/// Taken from the bound `SubjectClosureProjectionV1::validate` enforces rather
+/// than restated here, so a read that fits is a read the projection accepts and
+/// the two cannot drift apart.
+const MAX_SUBJECT_CLOSURE_OBSERVATIONS: usize = tuppira_shared::MAX_OBSERVATION_REFS;
+
 fn optional_u64(value: Option<i64>, field: &str) -> Result<Option<u64>> {
     value.map(|value| to_u64(value, field)).transpose()
+}
+
+async fn insert_closure_projection(
+    transaction: &mut Transaction<'_, Sqlite>,
+    observation_id: &str,
+    projection: &SourceClosureObservationProjectionV1,
+    payload: &str,
+) -> Result<()> {
+    let observed_checkpoint_height = match &projection.observed_checkpoint {
+        ObservedOrMissing::Observed { value } => {
+            Some(required_i64(value.block_height, "observed_checkpoint.block_height")?)
+        }
+        ObservedOrMissing::Missing { .. } => None,
+    };
+    sqlx::query(
+        "INSERT INTO closure_observations (observation_id, profile_id, profile_version, chain_id, network_id, closure_kind, closure_identity_hex, consumed_transition_id_hex, consumed_output_index, successor_commitment_hex, observed_checkpoint_height, indexed_tip_height, projection_json) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(observation_id)
+    .bind(SOURCE_CLOSURE_OBSERVATION_PROFILE_ID)
+    .bind(i64::from(projection.schema_version))
+    .bind(&projection.chain_id)
+    .bind(&projection.network_id)
+    .bind(&projection.closure_identity.closure_kind)
+    .bind(&projection.closure_identity.closure_identity_hex)
+    .bind(&projection.consumed_state.transition_id_hex)
+    .bind(i64::from(projection.consumed_state.output_index))
+    .bind(&projection.closure_identity.successor_commitment_hex)
+    .bind(observed_checkpoint_height)
+    .bind(required_i64(
+        projection.index_freshness.indexed_tip_height,
+        "index_freshness.indexed_tip_height",
+    )?)
+    .bind(payload)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn insert_closure_evidence(
+    transaction: &mut Transaction<'_, Sqlite>,
+    evidence: &ChainClosureEvidenceRecord,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO closure_observation_evidence (observation_id, schema_version, native_event_kind, raw_event_digest) VALUES (?, ?, ?, ?)",
+    )
+    .bind(&evidence.observation_id)
+    .bind(i64::from(evidence.schema_version))
+    .bind(&evidence.native_event_kind)
+    .bind(evidence.raw_event_digest.as_slice())
+    .execute(&mut **transaction)
+    .await?;
+    for (ordinal, reference) in evidence.evidence_refs.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO closure_observation_evidence_refs (observation_id, ordinal, evidence_ref) VALUES (?, ?, ?)",
+        )
+        .bind(&evidence.observation_id)
+        .bind(i64::try_from(ordinal).map_err(|_| invalid("evidence ordinal exceeds SQLite range"))?)
+        .bind(reference)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
+fn decode_closure_projection(
+    payload: &str,
+    observation: &ObservationRecord,
+) -> Result<SourceClosureObservationProjectionV1> {
+    decode_bound_closure_projection(payload, observation.normalized_payload_digest)
+}
+
+/// Decode stored closure bytes and re-check them against the digest the
+/// observation committed to.
+///
+/// The check is repeated on every read rather than trusted from write time.
+/// The append-only triggers stop this table being edited through SQL, but they
+/// say nothing about the bytes arriving corrupted or being replaced beneath the
+/// process; a payload that no longer hashes to its commitment is not a closure
+/// statement and must not be returned as one.
+fn decode_bound_closure_projection(
+    payload: &str,
+    expected_digest: [u8; 32],
+) -> Result<SourceClosureObservationProjectionV1> {
+    let projection: SourceClosureObservationProjectionV1 = serde_json::from_str(payload)
+        .map_err(|error| invalid(&format!("undecodable closure projection: {error}")))?;
+    projection
+        .validate()
+        .map_err(|error| invalid(&format!("invalid stored closure projection: {error:?}")))?;
+    let digest = projection
+        .normalized_payload_digest()
+        .map_err(|error| invalid(&format!("closure projection digest: {error:?}")))?;
+    if digest != expected_digest {
+        return Err(invalid(
+            "stored closure payload does not match the digest its observation committed to",
+        ));
+    }
+    Ok(projection)
+}
+
+fn decode_retraction(value: &str) -> Result<RetractionStatus> {
+    match value {
+        "active" => Ok(RetractionStatus::Active),
+        "retracted" => Ok(RetractionStatus::Retracted),
+        _ => Err(invalid("unsupported retraction status")),
+    }
 }
 
 async fn insert_observation(
@@ -391,11 +718,7 @@ fn decode_observation(
         },
         _ => return Err(invalid("unsupported visibility scope")),
     };
-    let retraction_status = match row.try_get::<String, _>("retraction_status")?.as_str() {
-        "active" => RetractionStatus::Active,
-        "retracted" => RetractionStatus::Retracted,
-        _ => return Err(invalid("unsupported retraction status")),
-    };
+    let retraction_status = decode_retraction(&row.try_get::<String, _>("retraction_status")?)?;
     Ok(ObservationRecord {
         schema_version: to_u16(row.try_get("schema_version")?, "schema_version")?,
         observation_id: row.try_get("observation_id")?,
@@ -869,6 +1192,463 @@ mod tests {
                 .is_err()
         );
         assert!(repository.get_observation("obs:correction").await.is_err());
+    }
+
+    // ── V2 source-closure observations (TUP-NE-002) ──────────────────────────
+
+    fn closure_projection() -> SourceClosureObservationProjectionV1 {
+        use tuppira_shared::{
+            ClosureIdentityReading, ClosureSettlementReading, ConsumedStateReading,
+            IndexFreshnessReading, ObservedCheckpointReading, SourceReportedSettlement,
+        };
+        SourceClosureObservationProjectionV1 {
+            schema_version: CLOSURE_OBSERVATION_PROFILE_VERSION,
+            consumed_state: ConsumedStateReading {
+                transition_id_hex: "11".repeat(32),
+                output_index: 0,
+                state_type: 1,
+            },
+            closure_identity: ClosureIdentityReading {
+                closure_kind: "evm-nullifier".into(),
+                closure_identity_hex: "0f1e2d3c".into(),
+                successor_commitment_hex: "22".repeat(32),
+            },
+            chain_id: "ethereum".into(),
+            network_id: "sepolia".into(),
+            successor_output_refs: vec!["output:0".into()],
+            observed_checkpoint: ObservedOrMissing::Observed {
+                value: ObservedCheckpointReading {
+                    block_height: 900,
+                    block_id_hex: "abcdef01".into(),
+                },
+            },
+            settlement: ObservedOrMissing::Observed {
+                value: ClosureSettlementReading {
+                    finality_policy: "confirmations".into(),
+                    observed_depth: 64,
+                    required_depth: 12,
+                    reported_settlement: SourceReportedSettlement::Final,
+                },
+            },
+            external_verification: ObservedOrMissing::Missing {
+                reasons: vec!["no verifier reported one".into()],
+            },
+            revocation: ObservedOrMissing::Missing {
+                reasons: vec!["source exposes no retraction feed".into()],
+            },
+            index_freshness: IndexFreshnessReading {
+                indexed_tip_height: 1_000,
+                indexed_tip_block_id_hex: "beef".into(),
+                indexed_tip_observed_at: 1_760_000_100,
+                lag_blocks: ObservedOrMissing::Observed { value: 100 },
+            },
+        }
+    }
+
+    /// An observation that correctly declares and commits to the closure payload.
+    fn closure_observation_record(
+        id: &str,
+        subject: &str,
+        projection: &SourceClosureObservationProjectionV1,
+    ) -> ObservationRecord {
+        let mut record = observation(id, 1, None);
+        record.source_event_id = format!("event:{id}");
+        record.source_event_type = "chain.closure".into();
+        record.subject_refs = vec![subject.into()];
+        record.normalized_profile_id = SOURCE_CLOSURE_OBSERVATION_PROFILE_ID.into();
+        record.normalized_profile_version = CLOSURE_OBSERVATION_PROFILE_VERSION;
+        record.normalized_payload_digest = projection
+            .normalized_payload_digest()
+            .expect("closure projection encodes");
+        record
+    }
+
+    #[tokio::test]
+    async fn a_closure_observation_round_trips_and_reports_its_states() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+
+        assert_eq!(
+            repository
+                .closure_observation("obs:closure:1", "tenant:acme")
+                .await
+                .ok(),
+            Some(projection.clone())
+        );
+        let account = repository.subject_closure("sanad:1", "tenant:acme").await;
+        assert!(account.is_ok());
+        let Ok(account) = account else { return };
+        assert!(matches!(
+            account.closure_generation,
+            ClosureProfileGeneration::SourceClosureV2 { .. }
+        ));
+        let states = account.established_states();
+        assert!(states.contains(&tuppira_shared::ClosureObservationState::Observed));
+        assert!(states.contains(&tuppira_shared::ClosureObservationState::Final));
+        // Nothing reported a foreign verdict, so nothing establishes one.
+        assert!(!states.contains(&tuppira_shared::ClosureObservationState::VerifiedElsewhere));
+    }
+
+    /// The migration must not let a pre-migration Sanad acquire a closure it
+    /// never had. Its stored `status = 'spent'` is a chain-level spend, and the
+    /// closure account for it is Unknown — the whole point of this ticket.
+    #[tokio::test]
+    async fn a_pre_migration_sanad_reports_unknown_closure_not_a_fabricated_one() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let spent = sqlx::query(
+            "INSERT INTO sanads (id, chain, seal_ref, commitment, owner, created_at, created_tx, status, transfer_count) \
+             VALUES ('sanad:legacy', 'ethereum', 'seal:1', 'commit:1', 'owner:1', 1, 'tx:1', 'spent', 2)",
+        )
+        .execute(&repository.pool)
+        .await;
+        assert!(spent.is_ok());
+
+        let account = repository
+            .subject_closure("sanad:legacy", "tenant:acme")
+            .await;
+        assert_eq!(
+            account.as_ref().map(SubjectClosureProjectionV1::established_states).ok(),
+            Some(std::collections::BTreeSet::from([
+                tuppira_shared::ClosureObservationState::Unknown
+            ]))
+        );
+        let Ok(account) = account else { return };
+        let ClosureProfileGeneration::PreClosure { reasons } = &account.closure_generation else {
+            panic!("a Sanad with no closure observation must not report a V2 generation");
+        };
+        assert!(!reasons.is_empty(), "absence must say why");
+        // The V1 read model is untouched and still means what it meant.
+        let status: Result<String> =
+            sqlx::query_scalar("SELECT status FROM sanads WHERE id = 'sanad:legacy'")
+                .fetch_one(&repository.pool)
+                .await
+                .map_err(Into::into);
+        assert_eq!(status.ok(), Some("spent".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_payload_the_observation_did_not_commit_to_is_rejected() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let mut record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        record.normalized_payload_digest = [5; 32];
+
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, None, &cursor(12))
+                .await
+                .is_err()
+        );
+        // The rollback is total: no observation row survives the rejection.
+        assert!(repository.get_observation("obs:closure:1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_closure_payload_under_a_foreign_profile_is_rejected() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let mut record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        record.normalized_profile_id = "org.diewan.some-other-profile.v1".into();
+
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, None, &cursor(12))
+                .await
+                .is_err()
+        );
+        assert!(repository.get_observation("obs:closure:1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_corrupted_stored_payload_is_not_returned_as_a_closure() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+        // Rewriting the payload is refused outright; were it not, the digest
+        // re-check on read is the second line that keeps it out of a result.
+        let overwrite = sqlx::query(
+            "UPDATE closure_observations SET projection_json = '{}' WHERE observation_id = 'obs:closure:1'",
+        )
+        .execute(&repository.pool)
+        .await;
+        assert!(overwrite.is_err());
+        assert!(
+            repository
+                .closure_observation("obs:closure:1", "tenant:acme")
+                .await
+                .is_ok()
+        );
+    }
+
+    /// Two closures competing for one consumed state is equivocation. Both must
+    /// be storable and both must appear: rejecting the second would leave the
+    /// first looking uncontested.
+    #[tokio::test]
+    async fn competing_closures_for_one_consumed_state_are_both_kept() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        add_source(&repository, "source:provider-b", "run:b").await;
+        let first = closure_projection();
+        let mut second = closure_projection();
+        second.closure_identity.successor_commitment_hex = "33".repeat(32);
+        second.successor_output_refs = vec!["output:1".into()];
+
+        let first_record = closure_observation_record("obs:closure:1", "sanad:1", &first);
+        let mut second_record = closure_observation_record("obs:closure:2", "sanad:1", &second);
+        second_record.source_id = "source:provider-b".into();
+        second_record.collection_run_id = "run:b".into();
+        second_record.observed_at = 13;
+
+        assert!(
+            repository
+                .append_closure_observation(&first_record, &first, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+        assert!(
+            repository
+                .append_closure_observation(
+                    &second_record,
+                    &second,
+                    None,
+                    &cursor_for("source:provider-b", 13)
+                )
+                .await
+                .is_ok()
+        );
+
+        let Ok(account) = repository.subject_closure("sanad:1", "tenant:acme").await else {
+            panic!("both competing closures must be readable");
+        };
+        let ClosureProfileGeneration::SourceClosureV2 { observations } = &account.closure_generation
+        else {
+            panic!("recorded closures must report a V2 generation");
+        };
+        assert_eq!(observations.len(), 2);
+        // Newest acquisition first, and the two successors stay distinct.
+        assert_eq!(observations[0].observation_id, "obs:closure:2");
+        assert_ne!(
+            observations[0].projection.closure_identity.successor_commitment_hex,
+            observations[1].projection.closure_identity.successor_commitment_hex
+        );
+    }
+
+    // ── Chain evidence stays reachable from the normalized closure (TUP-NE-003)
+
+    fn chain_evidence(observation_id: &str, kind: &str) -> ChainClosureEvidenceRecord {
+        ChainClosureEvidenceRecord {
+            schema_version: 1,
+            observation_id: observation_id.into(),
+            native_event_kind: kind.into(),
+            evidence_refs: vec![
+                "ethereum:sepolia:contract:cc".into(),
+                "ethereum:sepolia:log:ee:3".into(),
+            ],
+            raw_event_digest: [6; 32],
+        }
+    }
+
+    #[tokio::test]
+    async fn chain_evidence_is_stored_with_its_closure_and_read_back_in_order() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        let evidence = chain_evidence("obs:closure:1", "evm-nullifier");
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, Some(&evidence), &cursor(12))
+                .await
+                .is_ok()
+        );
+
+        assert_eq!(
+            repository
+                .closure_evidence("obs:closure:1", "tenant:acme")
+                .await
+                .ok(),
+            Some(evidence)
+        );
+    }
+
+    #[tokio::test]
+    async fn evidence_for_the_wrong_closure_family_is_rejected_whole() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        // The projection is an EVM nullifier; the evidence claims a Bitcoin spend.
+        let mismatched = chain_evidence("obs:closure:1", "bitcoin-outpoint-spend");
+
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, Some(&mismatched), &cursor(12))
+                .await
+                .is_err()
+        );
+        // Nothing partial survives: no observation, no closure, no evidence.
+        assert!(repository.get_observation("obs:closure:1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn evidence_addressed_to_another_observation_is_rejected_whole() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        let misaddressed = chain_evidence("obs:closure:elsewhere", "evm-nullifier");
+
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, Some(&misaddressed), &cursor(12))
+                .await
+                .is_err()
+        );
+        assert!(repository.get_observation("obs:closure:1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_closure_without_chain_evidence_reports_absence_rather_than_an_empty_record() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+
+        // The closure itself reads fine; only its chain evidence is absent, and
+        // absence is an error rather than an empty way back.
+        assert!(
+            repository
+                .closure_observation("obs:closure:1", "tenant:acme")
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            repository
+                .closure_evidence("obs:closure:1", "tenant:acme")
+                .await,
+            Err(TuppiraError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn stored_chain_evidence_cannot_be_rewritten() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        let evidence = chain_evidence("obs:closure:1", "evm-nullifier");
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, Some(&evidence), &cursor(12))
+                .await
+                .is_ok()
+        );
+
+        for statement in [
+            "UPDATE closure_observation_evidence SET raw_event_digest = zeroblob(32) WHERE observation_id = 'obs:closure:1'",
+            "DELETE FROM closure_observation_evidence WHERE observation_id = 'obs:closure:1'",
+            "UPDATE closure_observation_evidence_refs SET evidence_ref = 'elsewhere' WHERE observation_id = 'obs:closure:1'",
+        ] {
+            assert!(
+                sqlx::query(statement).execute(&repository.pool).await.is_err(),
+                "{statement}"
+            );
+        }
+        assert!(
+            repository
+                .closure_evidence("obs:closure:1", "tenant:acme")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn chain_evidence_stays_inside_the_tenant_boundary() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        let evidence = chain_evidence("obs:closure:1", "evm-nullifier");
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, Some(&evidence), &cursor(12))
+                .await
+                .is_ok()
+        );
+
+        assert!(matches!(
+            repository
+                .closure_evidence("obs:closure:1", "tenant:other")
+                .await,
+            Err(TuppiraError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn closure_reads_stay_inside_the_tenant_boundary() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+
+        assert!(matches!(
+            repository
+                .closure_observation("obs:closure:1", "tenant:other")
+                .await,
+            Err(TuppiraError::NotFound { .. })
+        ));
+        // A foreign tenant sees the subject as pre-closure rather than being
+        // told a closure exists that it may not read.
+        let Ok(account) = repository.subject_closure("sanad:1", "tenant:other").await else {
+            panic!("a cross-tenant closure read must succeed as pre-closure");
+        };
+        assert!(matches!(
+            account.closure_generation,
+            ClosureProfileGeneration::PreClosure { .. }
+        ));
     }
 
     #[tokio::test]

@@ -42,6 +42,14 @@ pub fn rest_routes() -> Router<AppState> {
             "/observations/{id}/lineage",
             get(handlers::observation_lineage),
         )
+        // V2 closure reads are added beside the existing observation routes,
+        // never folded into them: no existing response gains a closure field
+        // and no existing field changes meaning.
+        .route(
+            "/observations/{id}/closure",
+            get(handlers::observation_closure),
+        )
+        .route("/closure-observations", get(handlers::subject_closure))
         .route(
             "/observation-sources/health",
             get(handlers::observation_source_health),
