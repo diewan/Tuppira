@@ -845,6 +845,644 @@ pub fn assess_closure_conflicts(
     ClosureConflictSearchOutcome::CompetingClosuresObserved { competitors }
 }
 
+// ── Reorganization standing and the views that carry it (TUP-NE-004) ────────
+
+/// The only closure-orphaning record version understood by this release.
+pub const CLOSURE_ORPHANING_RECORD_VERSION: u16 = 1;
+
+/// How far the reported-descendant walk follows closure linkage before stopping.
+///
+/// A bound is required because the linkage is source-reported: nothing stops a
+/// set of observations describing a cycle, and an unbounded walk over one would
+/// not terminate. Stopping is reported as
+/// [`ClosureAncestryCoverage::TruncatedAtDepth`] rather than silently treated as
+/// a completed walk.
+pub const MAX_CLOSURE_ANCESTRY_DEPTH: u32 = 64;
+
+/// What became of a closure observation whose history a reorganization replaced.
+///
+/// The two variants are different source statements and are never merged.
+/// [`Self::Superseded`] is the source reporting the same closure again on the
+/// replacement history; [`Self::Retracted`] is the source reporting that it did
+/// not reappear there. Neither deletes anything: the orphaned observation stays
+/// exactly as it was recorded, and this is the statement placed beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "disposition", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OrphanedClosureDisposition {
+    /// The source re-reported this closure on the replacement history, under a
+    /// new observation which carries the live statement.
+    Superseded {
+        /// The observation carrying the replacement statement.
+        superseding_observation_id: String,
+    },
+    /// The closure did not reappear on the replacement history.
+    Retracted {
+        /// Why the source reported no replacement. Never empty.
+        reasons: Vec<String>,
+    },
+}
+
+impl OrphanedClosureDisposition {
+    fn validate(&self, subject_observation_id: &str) -> Result<(), ObservationValidationError> {
+        match self {
+            Self::Superseded {
+                superseding_observation_id,
+            } => {
+                validate_name(
+                    superseding_observation_id,
+                    "orphaning.superseding_observation_id",
+                )?;
+                // An observation that supersedes itself would make the orphaned
+                // statement its own replacement, which is not a correction.
+                if superseding_observation_id == subject_observation_id {
+                    return Err(ObservationValidationError::SelfSupersession);
+                }
+                Ok(())
+            }
+            Self::Retracted { reasons } => validate_reasons(reasons, "orphaning.reasons"),
+        }
+    }
+}
+
+/// A persisted statement that one reorganization orphaned one closure observation.
+///
+/// This is the record form. It is appended beside the observation it names and
+/// never replaces it: the observation plane's account of a reorganization is
+/// "here is what the source said, and here is what the source later said about
+/// it", not a corrected history in which the first statement never appeared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosureObservationOrphaningRecord {
+    /// Record version; see [`CLOSURE_ORPHANING_RECORD_VERSION`].
+    pub schema_version: u16,
+    /// The reorganization the source attributed the orphaning to.
+    pub reorg_id: String,
+    /// The closure observation whose history was replaced.
+    pub observation_id: String,
+    /// When the collector recorded the orphaning.
+    pub orphaned_at: u64,
+    /// What the source reported became of the closure.
+    pub disposition: OrphanedClosureDisposition,
+}
+
+impl ClosureObservationOrphaningRecord {
+    /// Fail-closed validation for ingestion and storage boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObservationValidationError`] for an unsupported version, a
+    /// malformed identifier, a zero timestamp, an empty reason set, or a
+    /// disposition naming the orphaned observation as its own replacement.
+    pub fn validate(&self) -> Result<(), ObservationValidationError> {
+        if self.schema_version != CLOSURE_ORPHANING_RECORD_VERSION {
+            return Err(ObservationValidationError::UnsupportedVersion(
+                self.schema_version,
+            ));
+        }
+        validate_name(&self.reorg_id, "orphaning.reorg_id")?;
+        validate_name(&self.observation_id, "orphaning.observation_id")?;
+        if self.orphaned_at == 0 {
+            return Err(ObservationValidationError::InvalidField(
+                "orphaning.orphaned_at",
+            ));
+        }
+        self.disposition.validate(&self.observation_id)
+    }
+}
+
+/// One recorded orphaning as a closure view reports it.
+///
+/// The reading omits `observation_id`, which is the observation the standing is
+/// attached to, and `schema_version`, which belongs to the stored record rather
+/// than to this read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosureOrphaningReading {
+    /// The reorganization the source attributed the orphaning to.
+    pub reorg_id: String,
+    /// When the collector recorded it.
+    pub orphaned_at: u64,
+    /// What the source reported became of the closure.
+    pub disposition: OrphanedClosureDisposition,
+}
+
+/// A closure observation this one descends from, as the sources reported it.
+///
+/// The linkage is the one the observations themselves express: this
+/// observation's consumed state names the transition that an earlier
+/// observation reported as its successor. Tuppira does not decide whether that
+/// linkage is protocol-valid — only Parwana's verifier can — so an ancestor
+/// reading is never evidence that the descendant is grounded. It is used in one
+/// direction only: to carry doubt downward when the ancestor loses its history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrphanedAncestorReading {
+    /// The orphaned observation this one descends from.
+    pub observation_id: String,
+    /// The successor commitment the linkage was followed through.
+    pub successor_commitment_hex: String,
+    /// Steps between the descendant and this ancestor; `1` is the parent.
+    pub depth: u32,
+}
+
+/// How much of the reported ancestry a standing actually covers.
+///
+/// A truncated walk is not a clean one. The distinction is kept because
+/// "no orphaned ancestor was found" and "no orphaned ancestor was found within
+/// the depth searched" are different statements, and only the first is about
+/// the ancestry rather than about the search.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "coverage", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClosureAncestryCoverage {
+    /// The reported linkage was followed to its end.
+    Complete,
+    /// The walk stopped at its bound, so an orphaned ancestor beyond it would
+    /// not appear in this standing.
+    TruncatedAtDepth {
+        /// The depth the walk reached before stopping.
+        depth: u32,
+    },
+}
+
+/// Where one closure observation stands after the reorganizations recorded
+/// against it and against the closures it descends from.
+///
+/// The two lists are separate because they answer different questions. An
+/// observation's own orphaning is a statement about the block that carried it;
+/// an orphaned ancestor is a statement about the ground beneath it. An
+/// observation can carry both, so this is a record of what applies rather than
+/// a single classification that would force one to hide the other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosureReorgStanding {
+    /// Orphanings recorded against this observation itself, oldest first.
+    pub own_orphanings: Vec<ClosureOrphaningReading>,
+    /// Orphaned closures this observation was reported to descend from,
+    /// nearest first.
+    pub orphaned_ancestors: Vec<OrphanedAncestorReading>,
+    /// How much of the reported ancestry the walk behind this standing covered.
+    pub ancestry_coverage: ClosureAncestryCoverage,
+}
+
+impl ClosureReorgStanding {
+    /// The standing of an observation no recorded reorganization reaches.
+    #[must_use]
+    pub fn unaffected() -> Self {
+        Self {
+            own_orphanings: Vec::new(),
+            orphaned_ancestors: Vec::new(),
+            ancestry_coverage: ClosureAncestryCoverage::Complete,
+        }
+    }
+
+    /// Whether a reorganization orphaned this observation itself.
+    #[must_use]
+    pub fn is_orphaned(&self) -> bool {
+        !self.own_orphanings.is_empty()
+    }
+
+    /// Whether this observation was reported to descend from an orphaned closure.
+    #[must_use]
+    pub fn descends_from_orphaned(&self) -> bool {
+        !self.orphaned_ancestors.is_empty()
+    }
+
+    /// Whether the source reported that the closure did not reappear.
+    ///
+    /// A retraction is the source withdrawing the closure. A supersession is
+    /// the source reporting it again on the replacement history, which
+    /// withdraws nothing — the replacement observation carries the live
+    /// statement. Only the first is a revocation.
+    #[must_use]
+    pub fn is_retracted(&self) -> bool {
+        self.own_orphanings.iter().any(|orphaning| {
+            matches!(
+                orphaning.disposition,
+                OrphanedClosureDisposition::Retracted { .. }
+            )
+        })
+    }
+
+    /// Fail-closed validation for storage and API boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObservationValidationError`] for a malformed identifier, a
+    /// zero timestamp, a duplicated reorganization or ancestor, a zero ancestry
+    /// depth, or a truncation depth above the declared bound.
+    pub fn validate(&self) -> Result<(), ObservationValidationError> {
+        if self.own_orphanings.len() > MAX_OBSERVATION_REFS
+            || self.orphaned_ancestors.len() > MAX_OBSERVATION_REFS
+        {
+            return Err(ObservationValidationError::BoundsExceeded("reorg_standing"));
+        }
+        let mut seen_reorgs = BTreeSet::new();
+        for orphaning in &self.own_orphanings {
+            validate_name(&orphaning.reorg_id, "own_orphanings.reorg_id")?;
+            if orphaning.orphaned_at == 0 {
+                return Err(ObservationValidationError::InvalidField(
+                    "own_orphanings.orphaned_at",
+                ));
+            }
+            // The disposition is checked against a subject the standing does
+            // not carry, so self-supersession is caught by the record's own
+            // validation at ingestion rather than re-derived here.
+            if let OrphanedClosureDisposition::Retracted { reasons } = &orphaning.disposition {
+                validate_reasons(reasons, "own_orphanings.reasons")?;
+            }
+            if !seen_reorgs.insert(orphaning.reorg_id.as_str()) {
+                return Err(ObservationValidationError::DuplicateReference(
+                    "own_orphanings.reorg_id",
+                ));
+            }
+        }
+        let mut seen_ancestors = BTreeSet::new();
+        for ancestor in &self.orphaned_ancestors {
+            validate_name(&ancestor.observation_id, "orphaned_ancestors.observation_id")?;
+            validate_hash_hex(
+                &ancestor.successor_commitment_hex,
+                "orphaned_ancestors.successor_commitment_hex",
+            )?;
+            if ancestor.depth == 0 || ancestor.depth > MAX_CLOSURE_ANCESTRY_DEPTH {
+                return Err(ObservationValidationError::InvalidField(
+                    "orphaned_ancestors.depth",
+                ));
+            }
+            if !seen_ancestors.insert(ancestor.observation_id.as_str()) {
+                return Err(ObservationValidationError::DuplicateReference(
+                    "orphaned_ancestors.observation_id",
+                ));
+            }
+        }
+        if let ClosureAncestryCoverage::TruncatedAtDepth { depth } = &self.ancestry_coverage
+            && (*depth == 0 || *depth > MAX_CLOSURE_ANCESTRY_DEPTH)
+        {
+            return Err(ObservationValidationError::InvalidField(
+                "ancestry_coverage.depth",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The states a closure observation still establishes once its reorganization
+/// standing is applied.
+///
+/// Three rules, and each of them only ever moves a read toward uncertainty.
+///
+/// **A replaced history cannot carry settlement.** The source's finality report
+/// was about a checkpoint on a history that no longer exists, so
+/// [`ClosureObservationState::Final`] is withdrawn from an orphaned observation
+/// and from anything reported to descend from one, and
+/// [`ClosureObservationState::Unknown`] takes its place. This plane's
+/// vocabulary spells "pending" as `Unknown`; a separate pending state would be
+/// a sixth state with no facet establishing it.
+///
+/// **What was observed stays observed.** [`ClosureObservationState::Observed`]
+/// and [`ClosureObservationState::VerifiedElsewhere`] are historical facts —
+/// a source did report this closure, and a named foreign verifier did return a
+/// verdict on it. A reorganization does not unsay either, and removing them
+/// would destroy the record an investigator needs to see that a verdict was
+/// once issued against a history that was later replaced. The added `Unknown`
+/// is what says the verdict no longer describes the live chain.
+///
+/// **Only a retraction revokes.** [`ClosureObservationState::Revoked`] is added
+/// when the source reported that the closure did not reappear. A superseded
+/// closure is not revoked: the source reported it again, and the superseding
+/// observation carries that statement.
+#[must_use]
+pub fn established_states_under_reorg(
+    projection: &SourceClosureObservationProjectionV1,
+    standing: &ClosureReorgStanding,
+) -> BTreeSet<ClosureObservationState> {
+    let mut states = projection.established_states();
+    if !standing.is_orphaned() && !standing.descends_from_orphaned() {
+        return states;
+    }
+    states.remove(&ClosureObservationState::Final);
+    states.insert(ClosureObservationState::Unknown);
+    if standing.is_retracted() {
+        states.insert(ClosureObservationState::Revoked);
+    }
+    states
+}
+
+/// The only closure index-tip record version understood by this release.
+pub const CLOSURE_INDEX_TIP_RECORD_VERSION: u16 = 1;
+
+/// How far the index has reached on one chain and network, as of now.
+///
+/// This is derived index state, not evidence: no observation commits to it and
+/// it carries no digest. It exists so that a closure read can report the lag it
+/// is being read under rather than only the lag its collector recorded, which
+/// is why it is written by the indexer as the tip advances and not copied from
+/// a stored projection.
+///
+/// The lag is deliberately absent. A lag is a distance between a checkpoint and
+/// a tip, so it belongs to a read of one observation, not to the tip itself;
+/// storing one here would make it read as a property of the chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosureIndexTipRecord {
+    /// Record version; see [`CLOSURE_INDEX_TIP_RECORD_VERSION`].
+    pub schema_version: u16,
+    /// The chain this tip is on.
+    pub chain_id: String,
+    /// The network within that chain.
+    pub network_id: String,
+    /// Highest block height indexed for this chain and network.
+    pub indexed_tip_height: u64,
+    /// Native identity of that tip, hex-encoded.
+    pub indexed_tip_block_id_hex: String,
+    /// When the tip was read.
+    pub indexed_tip_observed_at: u64,
+}
+
+impl ClosureIndexTipRecord {
+    /// Fail-closed validation for the storage boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObservationValidationError`] for an unsupported version, a
+    /// malformed chain, network, or block identity, or a zero read time.
+    pub fn validate(&self) -> Result<(), ObservationValidationError> {
+        if self.schema_version != CLOSURE_INDEX_TIP_RECORD_VERSION {
+            return Err(ObservationValidationError::UnsupportedVersion(
+                self.schema_version,
+            ));
+        }
+        validate_name(&self.chain_id, "index_tip.chain_id")?;
+        validate_name(&self.network_id, "index_tip.network_id")?;
+        validate_native_hex(
+            &self.indexed_tip_block_id_hex,
+            "index_tip.indexed_tip_block_id_hex",
+        )?;
+        if self.indexed_tip_observed_at == 0 {
+            return Err(ObservationValidationError::InvalidField(
+                "index_tip.indexed_tip_observed_at",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The freshness of a read of `observed_checkpoint` against this tip.
+    ///
+    /// `lag_blocks` is [`ObservedOrMissing::Missing`] when the source disclosed
+    /// no checkpoint — a lag against nothing is not zero — and also when the
+    /// checkpoint sits above the tip. The second case is not a negative lag to
+    /// be clamped to zero: a clamp would report a closure the index has not yet
+    /// reached as fully caught up, which is the strongest possible reading of
+    /// the weakest possible evidence.
+    #[must_use]
+    pub fn freshness_for(
+        &self,
+        observed_checkpoint: &ObservedOrMissing<ObservedCheckpointReading>,
+    ) -> IndexFreshnessReading {
+        let lag_blocks = match observed_checkpoint {
+            ObservedOrMissing::Missing { .. } => ObservedOrMissing::Missing {
+                reasons: vec![
+                    "the source disclosed no checkpoint, so there is no height to measure the index against"
+                        .to_string(),
+                ],
+            },
+            ObservedOrMissing::Observed { value } => {
+                match self.indexed_tip_height.checked_sub(value.block_height) {
+                    Some(lag) => ObservedOrMissing::Observed { value: lag },
+                    None => ObservedOrMissing::Missing {
+                        reasons: vec![
+                            "the observed checkpoint is above the indexed tip, so the index has not reached this closure"
+                                .to_string(),
+                        ],
+                    },
+                }
+            }
+        };
+        IndexFreshnessReading {
+            indexed_tip_height: self.indexed_tip_height,
+            indexed_tip_block_id_hex: self.indexed_tip_block_id_hex.clone(),
+            indexed_tip_observed_at: self.indexed_tip_observed_at,
+            lag_blocks,
+        }
+    }
+}
+
+/// The only closure-observation view version understood by this release.
+pub const CLOSURE_OBSERVATION_VIEW_VERSION: u16 = 1;
+
+/// One recorded closure observation as it reads now.
+///
+/// The distinction this type exists to keep is between what was stored and what
+/// is true of the read. `recorded` is the observation exactly as it was
+/// committed, digest and all, including the [`IndexFreshnessReading`] the
+/// *collector* produced it under. `read_index_freshness` is how far behind the
+/// chain the index is *now*, for this observation's chain and network. They are
+/// different measurements of different moments, and a view that carried only
+/// the first would present a year-old closure as a current one.
+///
+/// `established_states` is the set after [`established_states_under_reorg`] has
+/// been applied, so a consumer that reads this field never sees a settlement
+/// claim standing on a replaced history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosureObservationViewV1 {
+    /// View version; see [`CLOSURE_OBSERVATION_VIEW_VERSION`].
+    pub schema_version: u16,
+    /// The observation exactly as it was recorded.
+    pub recorded: RecordedSourceClosureObservationV1,
+    /// Where the observation stands after the recorded reorganizations.
+    pub reorg_standing: ClosureReorgStanding,
+    /// Index freshness at read time, for this observation's chain and network.
+    pub read_index_freshness: IndexFreshnessReading,
+    /// What the observation still establishes, in a stable order.
+    pub established_states: Vec<ClosureObservationState>,
+}
+
+impl ClosureObservationViewV1 {
+    /// Builds the view for one recorded observation and its standing.
+    ///
+    /// `read_index_freshness` is supplied by the read that produced it, because
+    /// only the storage layer knows how far the index has advanced.
+    #[must_use]
+    pub fn new(
+        recorded: RecordedSourceClosureObservationV1,
+        reorg_standing: ClosureReorgStanding,
+        read_index_freshness: IndexFreshnessReading,
+    ) -> Self {
+        let established_states =
+            established_states_under_reorg(&recorded.projection, &reorg_standing)
+                .into_iter()
+                .collect();
+        Self {
+            schema_version: CLOSURE_OBSERVATION_VIEW_VERSION,
+            recorded,
+            reorg_standing,
+            read_index_freshness,
+            established_states,
+        }
+    }
+
+    /// Fail-closed validation for API boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObservationValidationError`] for an unsupported version, an
+    /// invalid recorded projection or standing, a malformed read freshness, or
+    /// an established-state set that does not match the one the standing
+    /// produces.
+    pub fn validate(&self) -> Result<(), ObservationValidationError> {
+        if self.schema_version != CLOSURE_OBSERVATION_VIEW_VERSION {
+            return Err(ObservationValidationError::UnsupportedVersion(
+                self.schema_version,
+            ));
+        }
+        validate_name(&self.recorded.observation_id, "recorded.observation_id")?;
+        if self.recorded.observed_at == 0 {
+            return Err(ObservationValidationError::InvalidField(
+                "recorded.observed_at",
+            ));
+        }
+        self.recorded.projection.validate()?;
+        self.reorg_standing.validate()?;
+        self.read_index_freshness.validate()?;
+        // A view whose state set was assembled by anything other than the rule
+        // above would let a settlement claim survive a reorganization while the
+        // standing beside it says the history was replaced.
+        let expected: Vec<ClosureObservationState> =
+            established_states_under_reorg(&self.recorded.projection, &self.reorg_standing)
+                .into_iter()
+                .collect();
+        if self.established_states != expected {
+            return Err(ObservationValidationError::InvalidField(
+                "established_states",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The only subject-closure view version understood by this release.
+pub const SUBJECT_CLOSURE_VIEW_VERSION: u16 = 1;
+
+/// Normalization profile identifier for the reorg-aware subject closure view.
+pub const SUBJECT_CLOSURE_VIEW_PROFILE_ID: &str = "org.diewan.tuppira.subject-closure-view.v1";
+
+/// Which closure evidence a subject view carries, and the evidence itself.
+///
+/// The variants mirror [`ClosureProfileGeneration`] because the distinction
+/// they draw is the same one, and collapsing a subject with no closure evidence
+/// into an empty observation list is the fabrication both types exist to
+/// prevent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "generation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClosureViewGeneration {
+    /// Source-closure observations are recorded for this subject.
+    SourceClosureV2 {
+        /// Every recorded observation as it reads now, newest acquisition
+        /// first. Never empty.
+        observations: Vec<ClosureObservationViewV1>,
+    },
+    /// No source-closure observation is recorded for this subject.
+    PreClosure {
+        /// Why no closure statement exists. Never empty.
+        reasons: Vec<String>,
+    },
+}
+
+/// The closure account for one subject, as it reads now.
+///
+/// This is [`SubjectClosureProjectionV1`] after each recorded observation has
+/// been given its reorganization standing and its read-time freshness. The
+/// stored projection remains the account of what was committed; this is the
+/// account of what it currently supports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubjectClosureViewV1 {
+    /// View version; see [`SUBJECT_CLOSURE_VIEW_VERSION`].
+    pub schema_version: u16,
+    /// The subject this account is for, as observations reference it.
+    pub subject_ref: String,
+    /// What closure evidence exists, and the evidence itself.
+    pub closure_generation: ClosureViewGeneration,
+}
+
+impl SubjectClosureViewV1 {
+    /// The view a subject with no recorded closure observation gets.
+    #[must_use]
+    pub fn pre_closure(subject_ref: impl Into<String>) -> Self {
+        let SubjectClosureProjectionV1 {
+            subject_ref,
+            closure_generation,
+            ..
+        } = SubjectClosureProjectionV1::pre_closure(subject_ref);
+        let reasons = match closure_generation {
+            ClosureProfileGeneration::PreClosure { reasons } => reasons,
+            ClosureProfileGeneration::SourceClosureV2 { .. } => Vec::new(),
+        };
+        Self {
+            schema_version: SUBJECT_CLOSURE_VIEW_VERSION,
+            subject_ref,
+            closure_generation: ClosureViewGeneration::PreClosure { reasons },
+        }
+    }
+
+    /// Every state the recorded observations still establish for this subject.
+    ///
+    /// A union of the per-observation sets *after* each has had its standing
+    /// applied. Taking the union of the stored sets instead would let a
+    /// settlement withdrawn from every observation individually reappear in the
+    /// subject's account.
+    #[must_use]
+    pub fn established_states(&self) -> BTreeSet<ClosureObservationState> {
+        match &self.closure_generation {
+            ClosureViewGeneration::PreClosure { .. } => {
+                BTreeSet::from([ClosureObservationState::Unknown])
+            }
+            ClosureViewGeneration::SourceClosureV2 { observations } => observations
+                .iter()
+                .flat_map(|view| view.established_states.iter().copied())
+                .collect(),
+        }
+    }
+
+    /// Fail-closed validation for API boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObservationValidationError`] for an unsupported version, a
+    /// malformed subject reference, an empty or over-long generation payload, a
+    /// duplicated observation identifier, or an invalid nested view.
+    pub fn validate(&self) -> Result<(), ObservationValidationError> {
+        if self.schema_version != SUBJECT_CLOSURE_VIEW_VERSION {
+            return Err(ObservationValidationError::UnsupportedVersion(
+                self.schema_version,
+            ));
+        }
+        validate_name(&self.subject_ref, "subject_ref")?;
+        match &self.closure_generation {
+            ClosureViewGeneration::PreClosure { reasons } => {
+                validate_reasons(reasons, "closure_generation.reasons")
+            }
+            ClosureViewGeneration::SourceClosureV2 { observations } => {
+                if observations.is_empty() || observations.len() > MAX_OBSERVATION_REFS {
+                    return Err(ObservationValidationError::BoundsExceeded(
+                        "closure_generation.observations",
+                    ));
+                }
+                let mut seen = BTreeSet::new();
+                for view in observations {
+                    view.validate()?;
+                    if !seen.insert(view.recorded.observation_id.as_str()) {
+                        return Err(ObservationValidationError::DuplicateReference(
+                            "observations.observation_id",
+                        ));
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 fn validate_name(value: &str, field: &'static str) -> Result<(), ObservationValidationError> {
     if value.trim().is_empty() || value.len() > MAX_NATIVE_IDENTITY_HEX_LEN || value.contains('\0') {
         return Err(ObservationValidationError::InvalidField(field));
@@ -1723,5 +2361,336 @@ mod closure_observation_tests {
             outcome,
             ClosureConflictSearchOutcome::NoCompetitorObservedWithinIndexedRange { .. }
         ));
+    }
+
+    // ── Reorganization standing (TUP-NE-004) ─────────────────────────────────
+
+    fn retracted(reorg_id: &str) -> ClosureOrphaningReading {
+        ClosureOrphaningReading {
+            reorg_id: reorg_id.to_string(),
+            orphaned_at: 1_760_000_500,
+            disposition: OrphanedClosureDisposition::Retracted {
+                reasons: vec!["the closure did not reappear on the replacement history".to_string()],
+            },
+        }
+    }
+
+    fn superseded(reorg_id: &str, replacement: &str) -> ClosureOrphaningReading {
+        ClosureOrphaningReading {
+            reorg_id: reorg_id.to_string(),
+            orphaned_at: 1_760_000_500,
+            disposition: OrphanedClosureDisposition::Superseded {
+                superseding_observation_id: replacement.to_string(),
+            },
+        }
+    }
+
+    fn standing_with(own: Vec<ClosureOrphaningReading>) -> ClosureReorgStanding {
+        ClosureReorgStanding {
+            own_orphanings: own,
+            ..ClosureReorgStanding::unaffected()
+        }
+    }
+
+    fn tip(height: u64) -> ClosureIndexTipRecord {
+        ClosureIndexTipRecord {
+            schema_version: CLOSURE_INDEX_TIP_RECORD_VERSION,
+            chain_id: "ethereum".to_string(),
+            network_id: "sepolia".to_string(),
+            indexed_tip_height: height,
+            indexed_tip_block_id_hex: "beef".to_string(),
+            indexed_tip_observed_at: 1_760_000_900,
+        }
+    }
+
+    /// The projection reports `Final`; every test below starts from that so a
+    /// withdrawal is visible rather than assumed.
+    #[test]
+    fn an_unreorganized_projection_reports_settlement() {
+        let states = fully_reported().established_states();
+        assert!(states.contains(&ClosureObservationState::Final));
+        assert!(!states.contains(&ClosureObservationState::Unknown));
+    }
+
+    #[test]
+    fn a_standing_that_reaches_nothing_changes_no_state() {
+        let projection = fully_reported();
+        assert_eq!(
+            established_states_under_reorg(&projection, &ClosureReorgStanding::unaffected()),
+            projection.established_states(),
+        );
+    }
+
+    #[test]
+    fn an_orphaned_observation_no_longer_establishes_settlement() {
+        let projection = fully_reported();
+        let states =
+            established_states_under_reorg(&projection, &standing_with(vec![retracted("reorg-9")]));
+
+        // The source's finality report was about a checkpoint on a history that
+        // no longer exists.
+        assert!(!states.contains(&ClosureObservationState::Final));
+        assert!(states.contains(&ClosureObservationState::Unknown));
+    }
+
+    #[test]
+    fn a_reorganization_never_unsays_what_was_observed() {
+        let projection = fully_reported();
+        let states =
+            established_states_under_reorg(&projection, &standing_with(vec![retracted("reorg-9")]));
+
+        // Both are historical facts: a source did report this closure, and a
+        // named foreign verifier did return a verdict on it. Removing either
+        // would destroy the record an investigator needs to see that a verdict
+        // was once issued against a history that was later replaced.
+        assert!(states.contains(&ClosureObservationState::Observed));
+        assert!(states.contains(&ClosureObservationState::VerifiedElsewhere));
+    }
+
+    #[test]
+    fn only_a_retraction_revokes_and_a_supersession_does_not() {
+        let projection = fully_reported();
+
+        let retracted_states =
+            established_states_under_reorg(&projection, &standing_with(vec![retracted("reorg-9")]));
+        assert!(retracted_states.contains(&ClosureObservationState::Revoked));
+
+        // The source reported the closure again on the replacement history, so
+        // nothing was withdrawn — the superseding observation carries the live
+        // statement. Settlement still goes, because this observation's own
+        // checkpoint is on the replaced history.
+        let superseded_states = established_states_under_reorg(
+            &projection,
+            &standing_with(vec![superseded("reorg-9", "obs:replacement")]),
+        );
+        assert!(!superseded_states.contains(&ClosureObservationState::Revoked));
+        assert!(!superseded_states.contains(&ClosureObservationState::Final));
+        assert!(superseded_states.contains(&ClosureObservationState::Unknown));
+    }
+
+    #[test]
+    fn an_orphaned_ancestor_downgrades_a_descendant_that_was_never_orphaned_itself() {
+        let projection = fully_reported();
+        let standing = ClosureReorgStanding {
+            orphaned_ancestors: vec![OrphanedAncestorReading {
+                observation_id: "obs:ancestor".to_string(),
+                successor_commitment_hex: SUCCESSOR.to_string(),
+                depth: 1,
+            }],
+            ..ClosureReorgStanding::unaffected()
+        };
+        let states = established_states_under_reorg(&projection, &standing);
+
+        assert!(!standing.is_orphaned());
+        assert!(standing.descends_from_orphaned());
+        // Doubt travels downward: the ground beneath this closure was replaced.
+        assert!(!states.contains(&ClosureObservationState::Final));
+        assert!(states.contains(&ClosureObservationState::Unknown));
+        // But an ancestor's retraction is not this closure's revocation.
+        assert!(!states.contains(&ClosureObservationState::Revoked));
+    }
+
+    #[test]
+    fn a_view_cannot_carry_states_its_standing_does_not_produce() {
+        let recorded = RecordedSourceClosureObservationV1 {
+            observation_id: "obs:1".to_string(),
+            observed_at: 1_760_000_200,
+            record_retraction_status: RetractionStatus::Active,
+            projection: fully_reported(),
+        };
+        let standing = standing_with(vec![retracted("reorg-9")]);
+        let mut view = ClosureObservationViewV1::new(
+            recorded,
+            standing,
+            tip(1_000).freshness_for(&observed(checkpoint())),
+        );
+        assert_eq!(view.validate(), Ok(()));
+        assert!(!view.established_states.contains(&ClosureObservationState::Final));
+
+        // Re-asserting settlement beside a standing that says the history was
+        // replaced is exactly the substitution this validation exists to catch.
+        view.established_states.push(ClosureObservationState::Final);
+        assert_eq!(
+            view.validate(),
+            Err(ObservationValidationError::InvalidField("established_states")),
+        );
+    }
+
+    #[test]
+    fn a_subject_view_does_not_resurrect_a_settlement_withdrawn_from_every_observation() {
+        let orphaned = |id: &str| {
+            ClosureObservationViewV1::new(
+                RecordedSourceClosureObservationV1 {
+                    observation_id: id.to_string(),
+                    observed_at: 1_760_000_200,
+                    record_retraction_status: RetractionStatus::Active,
+                    projection: fully_reported(),
+                },
+                standing_with(vec![retracted("reorg-9")]),
+                tip(1_000).freshness_for(&observed(checkpoint())),
+            )
+        };
+        let view = SubjectClosureViewV1 {
+            schema_version: SUBJECT_CLOSURE_VIEW_VERSION,
+            subject_ref: "sanad:42".to_string(),
+            closure_generation: ClosureViewGeneration::SourceClosureV2 {
+                observations: vec![orphaned("obs:1"), orphaned("obs:2")],
+            },
+        };
+        assert_eq!(view.validate(), Ok(()));
+
+        let states = view.established_states();
+        assert!(!states.contains(&ClosureObservationState::Final));
+        assert!(states.contains(&ClosureObservationState::Unknown));
+    }
+
+    #[test]
+    fn a_subject_with_no_closure_evidence_is_unknown_rather_than_empty() {
+        let view = SubjectClosureViewV1::pre_closure("sanad:42");
+        assert_eq!(view.validate(), Ok(()));
+        assert_eq!(
+            view.established_states(),
+            BTreeSet::from([ClosureObservationState::Unknown]),
+        );
+        let ClosureViewGeneration::PreClosure { reasons } = &view.closure_generation else {
+            panic!("a subject with no closure observation must not report one");
+        };
+        assert!(!reasons.is_empty());
+    }
+
+    // ── The orphaning record's own boundary ──────────────────────────────────
+
+    fn orphaning_record(disposition: OrphanedClosureDisposition) -> ClosureObservationOrphaningRecord {
+        ClosureObservationOrphaningRecord {
+            schema_version: CLOSURE_ORPHANING_RECORD_VERSION,
+            reorg_id: "reorg-9".to_string(),
+            observation_id: "obs:1".to_string(),
+            orphaned_at: 1_760_000_500,
+            disposition,
+        }
+    }
+
+    #[test]
+    fn an_observation_cannot_be_its_own_replacement() {
+        let record = orphaning_record(OrphanedClosureDisposition::Superseded {
+            superseding_observation_id: "obs:1".to_string(),
+        });
+        assert_eq!(
+            record.validate(),
+            Err(ObservationValidationError::SelfSupersession),
+        );
+    }
+
+    #[test]
+    fn a_retraction_without_a_reason_is_rejected() {
+        let record = orphaning_record(OrphanedClosureDisposition::Retracted { reasons: vec![] });
+        assert!(record.validate().is_err());
+    }
+
+    #[test]
+    fn an_orphaning_record_of_an_unknown_version_is_rejected() {
+        let mut record = orphaning_record(OrphanedClosureDisposition::Retracted {
+            reasons: vec!["gone".to_string()],
+        });
+        record.schema_version = CLOSURE_ORPHANING_RECORD_VERSION + 1;
+        assert_eq!(
+            record.validate(),
+            Err(ObservationValidationError::UnsupportedVersion(
+                CLOSURE_ORPHANING_RECORD_VERSION + 1
+            )),
+        );
+    }
+
+    #[test]
+    fn one_reorganization_cannot_be_recorded_against_one_observation_twice() {
+        let standing = standing_with(vec![retracted("reorg-9"), retracted("reorg-9")]);
+        assert_eq!(
+            standing.validate(),
+            Err(ObservationValidationError::DuplicateReference(
+                "own_orphanings.reorg_id"
+            )),
+        );
+    }
+
+    #[test]
+    fn an_ancestor_beyond_the_walk_bound_is_rejected() {
+        let standing = ClosureReorgStanding {
+            orphaned_ancestors: vec![OrphanedAncestorReading {
+                observation_id: "obs:ancestor".to_string(),
+                successor_commitment_hex: SUCCESSOR.to_string(),
+                depth: MAX_CLOSURE_ANCESTRY_DEPTH + 1,
+            }],
+            ..ClosureReorgStanding::unaffected()
+        };
+        assert_eq!(
+            standing.validate(),
+            Err(ObservationValidationError::InvalidField(
+                "orphaned_ancestors.depth"
+            )),
+        );
+    }
+
+    #[test]
+    fn a_truncated_walk_records_the_depth_it_stopped_at() {
+        // "No orphaned ancestor was found" and "none was found within the depth
+        // searched" are different statements; only the first is about the
+        // ancestry rather than about the search.
+        let standing = ClosureReorgStanding {
+            ancestry_coverage: ClosureAncestryCoverage::TruncatedAtDepth {
+                depth: MAX_CLOSURE_ANCESTRY_DEPTH,
+            },
+            ..ClosureReorgStanding::unaffected()
+        };
+        assert_eq!(standing.validate(), Ok(()));
+        assert_ne!(standing.ancestry_coverage, ClosureAncestryCoverage::Complete);
+    }
+
+    // ── Read-time index freshness ────────────────────────────────────────────
+
+    #[test]
+    fn the_read_tip_is_the_index_tip_and_not_the_collectors() {
+        let projection = fully_reported();
+        // The collector recorded 1_000; the index has since advanced.
+        assert_eq!(projection.index_freshness.indexed_tip_height, 1_000);
+
+        let freshness = tip(5_000).freshness_for(&projection.observed_checkpoint);
+
+        assert_eq!(freshness.indexed_tip_height, 5_000);
+        assert_eq!(
+            freshness.lag_blocks,
+            ObservedOrMissing::Observed { value: 4_100 },
+        );
+    }
+
+    #[test]
+    fn a_closure_without_a_checkpoint_reports_no_lag_rather_than_zero() {
+        let freshness = tip(5_000).freshness_for(&missing("the source disclosed no checkpoint"));
+        assert!(matches!(
+            freshness.lag_blocks,
+            ObservedOrMissing::Missing { .. }
+        ));
+    }
+
+    #[test]
+    fn a_checkpoint_above_the_tip_reports_no_lag_rather_than_zero() {
+        // Clamping to zero would report a closure the index has not reached as
+        // fully caught up — the strongest reading of the weakest evidence.
+        let freshness = tip(100).freshness_for(&observed(checkpoint()));
+        let ObservedOrMissing::Missing { reasons } = &freshness.lag_blocks else {
+            panic!("a checkpoint above the tip is not a zero lag");
+        };
+        assert!(!reasons.is_empty());
+    }
+
+    #[test]
+    fn an_index_tip_of_an_unknown_version_is_rejected() {
+        let mut record = tip(100);
+        record.schema_version = CLOSURE_INDEX_TIP_RECORD_VERSION + 1;
+        assert_eq!(
+            record.validate(),
+            Err(ObservationValidationError::UnsupportedVersion(
+                CLOSURE_INDEX_TIP_RECORD_VERSION + 1
+            )),
+        );
     }
 }

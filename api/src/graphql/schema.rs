@@ -63,7 +63,7 @@ impl Query {
             .data::<crate::access::ObservationAccess>()
             .map_err(|_| Error::new("observation authentication required"))?;
         ObservationRepository::new(gql_ctx.pool.clone())
-            .subject_closure(&subject_ref, &access.tenant_id)
+            .subject_closure_view(&subject_ref, &access.tenant_id)
             .await
             .map(Into::into)
             .map_err(|error| Error::new(error.to_string()))
@@ -86,12 +86,11 @@ impl Query {
             .data::<crate::access::ObservationAccess>()
             .map_err(|_| Error::new("observation authentication required"))?;
         let repository = ObservationRepository::new(gql_ctx.pool.clone());
-        let record = repository
-            .get_visible_observation(&observation_id, &access.tenant_id)
-            .await
-            .map_err(|error| Error::new(error.to_string()))?;
-        let projection = repository
-            .closure_observation(&observation_id, &access.tenant_id)
+        // The reorg-aware view, not the bare projection: an observation whose
+        // history a reorganization replaced must not report `final` here
+        // (TUP-NE-004).
+        let observation_view = repository
+            .closure_observation_view(&observation_id, &access.tenant_id)
             .await
             .map_err(|error| Error::new(error.to_string()))?;
         // The way back to the chain event, when the closure came from one.
@@ -103,14 +102,7 @@ impl Query {
             Err(tuppira_shared::TuppiraError::NotFound { .. }) => None,
             Err(error) => return Err(Error::new(error.to_string())),
         };
-        let mut view: ClosureObservationProjectionV1 =
-            tuppira_shared::RecordedSourceClosureObservationV1 {
-                observation_id,
-                observed_at: record.observed_at,
-                record_retraction_status: record.retraction_status,
-                projection,
-            }
-            .into();
+        let mut view: ClosureObservationProjectionV1 = observation_view.into();
         view.chain_evidence = chain_evidence;
         Ok(view)
     }
@@ -767,6 +759,59 @@ mod tests {
         assert!(sdl.contains("type ClosureObservationGql {"));
         assert!(sdl.contains("type SubjectClosureGql {"));
         assert!(sdl.contains("subjectClosure("));
+    }
+
+    /// Acceptance criterion: every closure view carries the indexed tip and lag.
+    ///
+    /// A consumer must be able to reach both without asking a second question,
+    /// because a closure view separated from its lag reads as current.
+    #[tokio::test]
+    async fn every_closure_view_carries_its_reorg_standing_and_read_freshness() {
+        let schema = Schema::build(Query, Mutation, Subscription).finish();
+        let sdl = schema.sdl();
+        let Some(start) = sdl.find("type ClosureObservationGql {") else {
+            panic!("the closure read model must exist");
+        };
+        let body = &sdl[start..];
+        let Some(end) = body.find("\n}") else {
+            panic!("malformed SDL for ClosureObservationGql");
+        };
+        let body = &body[..end];
+
+        assert!(body.contains("reorgStanding: ClosureReorgStandingGql!"));
+        assert!(body.contains("readIndexFreshness: ClosureIndexFreshnessGql!"));
+        // The view rules are versioned separately from the payload profile, so
+        // a consumer can tell which rules produced `establishedStates`.
+        assert!(body.contains("viewVersion: Int!"));
+        assert!(body.contains("profileVersion: Int!"));
+
+        // The tip and the lag are both reachable, and an unmeasurable lag is
+        // nullable with its reasons rather than defaulted to zero.
+        let Some(freshness_start) = sdl.find("type ClosureIndexFreshnessGql {") else {
+            panic!("the read-time freshness type must exist");
+        };
+        let freshness = &sdl[freshness_start..];
+        let freshness = &freshness[..freshness.find("\n}").unwrap_or(freshness.len())];
+        assert!(freshness.contains("indexedTipHeight: Int!"));
+        assert!(freshness.contains("lagBlocks: Int"));
+        // Nullable on purpose: an unmeasurable lag is absent, never zero.
+        assert!(!freshness.contains("lagBlocks: Int!"));
+        assert!(freshness.contains("lagUnavailableReasons: [String!]!"));
+
+        // A supersession and a retraction stay distinguishable on the wire.
+        let Some(standing_start) = sdl.find("type ClosureReorgStandingGql {") else {
+            panic!("the reorg standing type must exist");
+        };
+        let standing = &sdl[standing_start..];
+        let standing = &standing[..standing.find("\n}").unwrap_or(standing.len())];
+        assert!(standing.contains("isOrphaned: Boolean!"));
+        assert!(standing.contains("descendsFromOrphaned: Boolean!"));
+        assert!(standing.contains("isRetracted: Boolean!"));
+        // A truncated ancestry walk is not reported as a clean one.
+        assert!(standing.contains("ancestryCoverage: String!"));
+        assert!(standing.contains("ancestryCoverageDepth: Int"));
+        // Absent when the coverage is `complete`, so it is nullable.
+        assert!(!standing.contains("ancestryCoverageDepth: Int!"));
     }
 
     /// A subject with no recorded closure observation must report `pre_closure`

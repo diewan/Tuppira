@@ -104,13 +104,180 @@ pub struct ClosureObservationProjectionV1 {
     pub consumed_transition_id_hex: String,
     pub consumed_output_index: i64,
     pub successor_commitment_hex: String,
-    /// Every state this one observation establishes, as a set and never a badge.
+    /// Version of the *view* rules that produced `established_states`,
+    /// `reorg_standing`, and `read_index_freshness`. Distinct from
+    /// `profile_version`, which versions `payload` and did not change when
+    /// these three were added (TUP-NE-004).
+    pub view_version: i32,
+    /// Every state this one observation **still** establishes, as a set and
+    /// never a badge.
+    ///
+    /// This is the set after [`tuppira_shared::established_states_under_reorg`]
+    /// has been applied, so it is never `final` for a closure whose history a
+    /// reorganization replaced. It is therefore not the same set as
+    /// `payload.established_states` would give: the rules only ever move a read
+    /// toward uncertainty, and a consumer that wants the source's original
+    /// statement reads `payload`.
     pub established_states: Vec<String>,
+    /// Where this observation stands after the recorded reorganizations.
+    pub reorg_standing: ClosureReorgStandingGql,
+    /// How far behind the chain the index is **now** for this observation's
+    /// chain and network.
+    ///
+    /// Distinct from the freshness inside `payload`, which is what the
+    /// collector measured when the projection was produced. A view carrying
+    /// only the second would present a year-old closure as a current one.
+    pub read_index_freshness: IndexFreshnessGql,
     /// The projection exactly as stored, under the profile named above.
     pub payload: JsonValueScalar,
     /// The way back to the chain event this closure was normalized from.
     /// Absent for a closure relayed by a source that is not a chain.
     pub chain_evidence: Option<ChainClosureEvidenceGql>,
+}
+
+/// What a reorganization did to one closure observation, and to its ancestry.
+///
+/// The two lists are separate because they answer different questions. An
+/// observation's own orphaning is a statement about the block that carried it;
+/// an orphaned ancestor is a statement about the ground beneath it. An
+/// observation can carry both, so neither is folded into a single verdict.
+#[derive(SimpleObject, Clone)]
+#[graphql(name = "ClosureReorgStandingGql")]
+pub struct ClosureReorgStandingGql {
+    /// Whether a reorganization orphaned this observation itself.
+    pub is_orphaned: bool,
+    /// Whether it was reported to descend from an orphaned closure.
+    pub descends_from_orphaned: bool,
+    /// Whether the source reported the closure did not reappear. A superseded
+    /// closure is *not* retracted: the source reported it again, and the
+    /// superseding observation carries that statement.
+    pub is_retracted: bool,
+    /// Orphanings recorded against this observation, oldest first.
+    pub own_orphanings: Vec<ClosureOrphaningGql>,
+    /// Orphaned closures this one was reported to descend from, nearest first.
+    pub orphaned_ancestors: Vec<OrphanedClosureAncestorGql>,
+    /// `complete` or `truncated_at_depth`. A truncated walk is not a clean one:
+    /// an orphaned ancestor beyond the bound would not appear above.
+    pub ancestry_coverage: String,
+    /// The depth the walk stopped at. Absent when the coverage is `complete`.
+    pub ancestry_coverage_depth: Option<i64>,
+}
+
+/// One recorded orphaning of a closure observation.
+#[derive(SimpleObject, Clone)]
+#[graphql(name = "ClosureOrphaningGql")]
+pub struct ClosureOrphaningGql {
+    /// The reorganization the source attributed the orphaning to.
+    pub reorg_id: String,
+    /// When the collector recorded it.
+    pub orphaned_at: i64,
+    /// `superseded` or `retracted`.
+    pub disposition: String,
+    /// The observation carrying the replacement statement. Present only for
+    /// `superseded`.
+    pub superseding_observation_id: Option<String>,
+    /// Why the source reported no replacement. Present only for `retracted`.
+    pub retraction_reasons: Vec<String>,
+}
+
+/// An orphaned closure a later observation was reported to descend from.
+///
+/// The linkage is the one the observations express: this observation's consumed
+/// state names the transition an earlier observation reported as its successor.
+/// Tuppira does not decide whether that linkage is protocol-valid — only
+/// Parwana's verifier can — so this is never evidence that the descendant is
+/// grounded, only that its ground was replaced.
+#[derive(SimpleObject, Clone)]
+#[graphql(name = "OrphanedClosureAncestorGql")]
+pub struct OrphanedClosureAncestorGql {
+    pub observation_id: String,
+    /// The successor commitment the linkage was followed through.
+    pub successor_commitment_hex: String,
+    /// Steps between this observation and the ancestor; `1` is the parent.
+    pub depth: i64,
+}
+
+/// How far behind the chain an index is, as of one read.
+#[derive(SimpleObject, Clone)]
+#[graphql(name = "ClosureIndexFreshnessGql")]
+pub struct IndexFreshnessGql {
+    pub indexed_tip_height: i64,
+    pub indexed_tip_block_id_hex: String,
+    pub indexed_tip_observed_at: i64,
+    /// Blocks between the observed checkpoint and the indexed tip. Absent when
+    /// it could not be measured — a lag against nothing is not zero, and an
+    /// absent lag is weaker evidence than a large one, never stronger.
+    pub lag_blocks: Option<i64>,
+    /// Why the lag is absent. Empty when `lag_blocks` is present.
+    pub lag_unavailable_reasons: Vec<String>,
+}
+
+impl From<tuppira_shared::IndexFreshnessReading> for IndexFreshnessGql {
+    fn from(value: tuppira_shared::IndexFreshnessReading) -> Self {
+        let (lag_blocks, lag_unavailable_reasons) = match value.lag_blocks {
+            tuppira_shared::ObservedOrMissing::Observed { value } => (Some(value as i64), Vec::new()),
+            tuppira_shared::ObservedOrMissing::Missing { reasons } => (None, reasons),
+        };
+        Self {
+            indexed_tip_height: value.indexed_tip_height as i64,
+            indexed_tip_block_id_hex: value.indexed_tip_block_id_hex,
+            indexed_tip_observed_at: value.indexed_tip_observed_at as i64,
+            lag_blocks,
+            lag_unavailable_reasons,
+        }
+    }
+}
+
+impl From<tuppira_shared::ClosureReorgStanding> for ClosureReorgStandingGql {
+    fn from(value: tuppira_shared::ClosureReorgStanding) -> Self {
+        let is_orphaned = value.is_orphaned();
+        let descends_from_orphaned = value.descends_from_orphaned();
+        let is_retracted = value.is_retracted();
+        let (ancestry_coverage, ancestry_coverage_depth) = match value.ancestry_coverage {
+            tuppira_shared::ClosureAncestryCoverage::Complete => ("complete", None),
+            tuppira_shared::ClosureAncestryCoverage::TruncatedAtDepth { depth } => {
+                ("truncated_at_depth", Some(i64::from(depth)))
+            }
+        };
+        Self {
+            is_orphaned,
+            descends_from_orphaned,
+            is_retracted,
+            own_orphanings: value
+                .own_orphanings
+                .into_iter()
+                .map(|orphaning| {
+                    let (disposition, superseding_observation_id, retraction_reasons) =
+                        match orphaning.disposition {
+                            tuppira_shared::OrphanedClosureDisposition::Superseded {
+                                superseding_observation_id,
+                            } => ("superseded", Some(superseding_observation_id), Vec::new()),
+                            tuppira_shared::OrphanedClosureDisposition::Retracted { reasons } => {
+                                ("retracted", None, reasons)
+                            }
+                        };
+                    ClosureOrphaningGql {
+                        reorg_id: orphaning.reorg_id,
+                        orphaned_at: orphaning.orphaned_at as i64,
+                        disposition: disposition.to_string(),
+                        superseding_observation_id,
+                        retraction_reasons,
+                    }
+                })
+                .collect(),
+            orphaned_ancestors: value
+                .orphaned_ancestors
+                .into_iter()
+                .map(|ancestor| OrphanedClosureAncestorGql {
+                    observation_id: ancestor.observation_id,
+                    successor_commitment_hex: ancestor.successor_commitment_hex,
+                    depth: i64::from(ancestor.depth),
+                })
+                .collect(),
+            ancestry_coverage: ancestry_coverage.to_string(),
+            ancestry_coverage_depth,
+        }
+    }
 }
 
 /// Chain-native locators addressing the evidence behind a normalized closure.
@@ -137,13 +304,17 @@ impl From<tuppira_shared::ChainClosureEvidenceRecord> for ChainClosureEvidenceGq
     }
 }
 
-impl From<tuppira_shared::RecordedSourceClosureObservationV1> for ClosureObservationProjectionV1 {
-    fn from(value: tuppira_shared::RecordedSourceClosureObservationV1) -> Self {
-        let projection = value.projection;
+impl From<tuppira_shared::ClosureObservationViewV1> for ClosureObservationProjectionV1 {
+    fn from(value: tuppira_shared::ClosureObservationViewV1) -> Self {
+        let established_states = value.established_states.iter().map(state_name).collect();
+        let reorg_standing = value.reorg_standing.into();
+        let read_index_freshness = value.read_index_freshness.into();
+        let recorded = value.recorded;
+        let projection = recorded.projection;
         Self {
-            observation_id: value.observation_id,
-            observed_at: value.observed_at as i64,
-            record_retraction_status: state_name(&value.record_retraction_status),
+            observation_id: recorded.observation_id,
+            observed_at: recorded.observed_at as i64,
+            record_retraction_status: state_name(&recorded.record_retraction_status),
             profile_id: tuppira_shared::SOURCE_CLOSURE_OBSERVATION_PROFILE_ID.to_string(),
             profile_version: i32::from(projection.schema_version),
             chain_id: projection.chain_id.clone(),
@@ -156,11 +327,10 @@ impl From<tuppira_shared::RecordedSourceClosureObservationV1> for ClosureObserva
                 .closure_identity
                 .successor_commitment_hex
                 .clone(),
-            established_states: projection
-                .established_states()
-                .iter()
-                .map(state_name)
-                .collect(),
+            view_version: i32::from(tuppira_shared::CLOSURE_OBSERVATION_VIEW_VERSION),
+            established_states,
+            reorg_standing,
+            read_index_freshness,
             payload: JsonValueScalar(
                 serde_json::to_value(&projection).unwrap_or(JsonValue::Null),
             ),
@@ -178,6 +348,11 @@ impl From<tuppira_shared::RecordedSourceClosureObservationV1> for ClosureObserva
 /// no closure observation is recorded — which is what every Sanad, transfer, and
 /// seal indexed before the closure profile reports — and it carries reasons
 /// rather than an empty closure. It is never derived from a V1 explorer status.
+///
+/// `established_states` is the union of the per-observation sets *after* each
+/// has had its reorganization standing applied (TUP-NE-004). Taking the union
+/// of the stored sets instead would let a settlement withdrawn from every
+/// observation individually reappear in the subject's account.
 #[derive(SimpleObject, Clone)]
 #[graphql(name = "SubjectClosureGql")]
 pub struct SubjectClosureProjectionV1Gql {
@@ -194,14 +369,14 @@ pub struct SubjectClosureProjectionV1Gql {
     pub established_states: Vec<String>,
 }
 
-impl From<tuppira_shared::SubjectClosureProjectionV1> for SubjectClosureProjectionV1Gql {
-    fn from(value: tuppira_shared::SubjectClosureProjectionV1) -> Self {
+impl From<tuppira_shared::SubjectClosureViewV1> for SubjectClosureProjectionV1Gql {
+    fn from(value: tuppira_shared::SubjectClosureViewV1) -> Self {
         let established_states = value.established_states().iter().map(state_name).collect();
         let (generation, pre_closure_reasons, observations) = match value.closure_generation {
-            tuppira_shared::ClosureProfileGeneration::PreClosure { reasons } => {
+            tuppira_shared::ClosureViewGeneration::PreClosure { reasons } => {
                 ("pre_closure", reasons, Vec::new())
             }
-            tuppira_shared::ClosureProfileGeneration::SourceClosureV2 { observations } => (
+            tuppira_shared::ClosureViewGeneration::SourceClosureV2 { observations } => (
                 "source_closure_v2",
                 Vec::new(),
                 observations.into_iter().map(Into::into).collect(),
@@ -209,7 +384,7 @@ impl From<tuppira_shared::SubjectClosureProjectionV1> for SubjectClosureProjecti
         };
         Self {
             schema_version: i32::from(value.schema_version),
-            profile_id: tuppira_shared::SUBJECT_CLOSURE_PROJECTION_PROFILE_ID.to_string(),
+            profile_id: tuppira_shared::SUBJECT_CLOSURE_VIEW_PROFILE_ID.to_string(),
             subject_ref: value.subject_ref,
             generation: generation.to_string(),
             pre_closure_reasons,

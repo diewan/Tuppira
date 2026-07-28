@@ -29,6 +29,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         7,
         include_str!("../migrations/0007_closure_chain_evidence.sql"),
     ),
+    (
+        8,
+        include_str!("../migrations/0008_closure_reorg_standing.sql"),
+    ),
 ];
 
 /// Initialize the database connection pool and apply schema.
@@ -121,7 +125,7 @@ mod tests {
             sqlx::query_scalar("SELECT COUNT(*) FROM _tuppira_migrations")
                 .fetch_one(&pool)
                 .await;
-        assert!(matches!(count, Ok(7)));
+        assert!(matches!(count, Ok(8)));
         let observation_tables: Result<i64, sqlx::Error> = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('observations', 'raw_payload_descriptors', 'collection_runs', 'sync_cursors', 'supersessions')",
         ).fetch_one(&pool).await;
@@ -134,6 +138,10 @@ mod tests {
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('closure_observations', 'closure_observation_evidence', 'closure_observation_evidence_refs')",
         ).fetch_one(&pool).await;
         assert!(matches!(closure_tables, Ok(3)));
+        let reorg_standing_tables: Result<i64, sqlx::Error> = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('closure_observation_orphanings', 'closure_observation_orphaning_reasons', 'closure_index_tips')",
+        ).fetch_one(&pool).await;
+        assert!(matches!(reorg_standing_tables, Ok(3)));
 
         // Re-opening the same pool proves the migration ledger is idempotent.
         let reapplied = super::apply_migrations(&pool).await;
@@ -142,7 +150,7 @@ mod tests {
             sqlx::query_scalar("SELECT COUNT(*) FROM _tuppira_migrations")
                 .fetch_one(&pool)
                 .await;
-        assert!(matches!(count, Ok(7)));
+        assert!(matches!(count, Ok(8)));
     }
 
     /// The V1 explorer read model must survive the closure migration untouched:

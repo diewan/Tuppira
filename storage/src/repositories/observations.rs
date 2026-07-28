@@ -1,14 +1,18 @@
 //! Typed persistence for source-neutral observations and their lineage.
 
+use std::collections::BTreeSet;
+
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use tuppira_shared::{
-    CLOSURE_OBSERVATION_PROFILE_VERSION, ChainClosureEvidenceRecord, ClosureProfileGeneration,
-    CollectionRunRecord, ContradictionHintRecord, ObservationRecord, ObservedOrMissing,
-    RawPayloadDescriptor,
+    CLOSURE_OBSERVATION_PROFILE_VERSION, ChainClosureEvidenceRecord, ClosureAncestryCoverage,
+    ClosureIndexTipRecord, ClosureObservationOrphaningRecord, ClosureObservationViewV1,
+    ClosureOrphaningReading, ClosureProfileGeneration, ClosureReorgStanding, ClosureViewGeneration,
+    CollectionRunRecord, ContradictionHintRecord, MAX_CLOSURE_ANCESTRY_DEPTH, ObservationRecord,
+    ObservedOrMissing, OrphanedAncestorReading, OrphanedClosureDisposition, RawPayloadDescriptor,
     RecordedSourceClosureObservationV1, ReorgRecord, Result, RetentionClassRecord,
     RetractionStatus, SOURCE_CLOSURE_OBSERVATION_PROFILE_ID, SUBJECT_CLOSURE_PROFILE_VERSION,
     SourceClosureObservationProjectionV1, SourceRecord, SubjectClosureProjectionV1,
-    SyncCursorRecord, TenantVisibility, TuppiraError,
+    SubjectClosureViewV1, SyncCursorRecord, TenantVisibility, TuppiraError,
 };
 
 /// Observation-plane repository. Inserts validate at the typed boundary and
@@ -270,9 +274,438 @@ impl ObservationRepository {
         if let Some(evidence) = evidence {
             insert_closure_evidence(&mut transaction, evidence).await?;
         }
+        // The collector read a tip to produce this projection, so record it as
+        // index state in the same transaction. Without this a chain whose first
+        // closure arrives after migration 0008 would have no tip at all, and a
+        // read of that closure could not say how far behind the index is. It
+        // only ever advances the tip (TUP-NE-004).
+        upsert_closure_index_tip(
+            &mut transaction,
+            &ClosureIndexTipRecord {
+                schema_version: tuppira_shared::CLOSURE_INDEX_TIP_RECORD_VERSION,
+                chain_id: projection.chain_id.clone(),
+                network_id: projection.network_id.clone(),
+                indexed_tip_height: projection.index_freshness.indexed_tip_height,
+                indexed_tip_block_id_hex: projection
+                    .index_freshness
+                    .indexed_tip_block_id_hex
+                    .clone(),
+                indexed_tip_observed_at: projection.index_freshness.indexed_tip_observed_at,
+            },
+        )
+        .await?;
         upsert_cursor(&mut transaction, cursor).await?;
         transaction.commit().await?;
         Ok(())
+    }
+
+    // ── Reorganization standing and reorg-aware views (TUP-NE-004) ───────────
+
+    /// Advance the recorded index tip for one chain and network.
+    ///
+    /// Returns whether the tip moved. A reading at or below the recorded tip is
+    /// not an error and is discarded: connectors read out of order, and the tip
+    /// is the high-water mark of what the index has reached, not the last thing
+    /// it happened to look at. Letting a lower reading win would shrink every
+    /// lag computed against it without the index having fallen behind.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on an invalid record or a height outside SQLite's range.
+    pub async fn advance_closure_index_tip(&self, record: &ClosureIndexTipRecord) -> Result<bool> {
+        record
+            .validate()
+            .map_err(|error| invalid(&format!("invalid closure index tip: {error:?}")))?;
+        let mut transaction = self.pool.begin().await?;
+        let advanced = upsert_closure_index_tip(&mut transaction, record).await?;
+        transaction.commit().await?;
+        Ok(advanced)
+    }
+
+    /// Record that a reorganization orphaned one closure observation.
+    ///
+    /// Nothing is deleted or edited: `closure_observations` is append-only by
+    /// trigger, so the orphaned statement stays readable exactly as the source
+    /// first reported it and this is appended beside it. Removing it would
+    /// destroy the only record that the source once said it.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when the record is invalid, when the reorganization belongs
+    /// to a different source than the observation, when the orphaning precedes
+    /// the observation it names, when a replacement closes a different consumed
+    /// state, or when the observation carries no closure statement at all.
+    pub async fn record_closure_orphaning(
+        &self,
+        record: &ClosureObservationOrphaningRecord,
+    ) -> Result<()> {
+        record
+            .validate()
+            .map_err(|error| invalid(&format!("invalid closure orphaning: {error:?}")))?;
+        // An observation with no closure payload has no closure to orphan. The
+        // foreign key would catch this, but the error it raises names a
+        // constraint rather than the thing that is wrong.
+        let is_closure = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM closure_observations WHERE observation_id = ?",
+        )
+        .bind(&record.observation_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if is_closure == 0 {
+            return Err(invalid(
+                "a reorganization cannot orphan an observation that carries no closure statement",
+            ));
+        }
+
+        let (disposition, superseding) = match &record.disposition {
+            OrphanedClosureDisposition::Superseded {
+                superseding_observation_id,
+            } => ("superseded", Some(superseding_observation_id.as_str())),
+            OrphanedClosureDisposition::Retracted { .. } => ("retracted", None),
+        };
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO closure_observation_orphanings (reorg_id, observation_id, schema_version, orphaned_at, disposition, superseding_observation_id) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&record.reorg_id)
+        .bind(&record.observation_id)
+        .bind(i64::from(record.schema_version))
+        .bind(required_i64(record.orphaned_at, "orphaned_at")?)
+        .bind(disposition)
+        .bind(superseding)
+        .execute(&mut *transaction)
+        .await?;
+        if let OrphanedClosureDisposition::Retracted { reasons } = &record.disposition {
+            for (ordinal, reason) in reasons.iter().enumerate() {
+                sqlx::query(
+                    "INSERT INTO closure_observation_orphaning_reasons (reorg_id, observation_id, ordinal, reason) VALUES (?, ?, ?, ?)",
+                )
+                .bind(&record.reorg_id)
+                .bind(&record.observation_id)
+                .bind(
+                    i64::try_from(ordinal)
+                        .map_err(|_| invalid("orphaning reason ordinal exceeds SQLite range"))?,
+                )
+                .bind(reason)
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// One closure observation as it reads now, tenant-filtered.
+    ///
+    /// This is [`Self::closure_observation`] plus the two things that make a
+    /// stored projection safe to read later: the reorganizations recorded
+    /// against it and against the closures it descends from, and how far behind
+    /// the chain the index is *at this moment* rather than when the collector
+    /// produced the projection.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when the observation carries no closure, when its stored
+    /// payload no longer matches its digest, or when no index tip is recorded
+    /// for its chain and network.
+    pub async fn closure_observation_view(
+        &self,
+        observation_id: &str,
+        tenant_id: &str,
+    ) -> Result<ClosureObservationViewV1> {
+        let observation = self.get_visible_observation(observation_id, tenant_id).await?;
+        let projection = self.closure_observation(observation_id, tenant_id).await?;
+        let recorded = RecordedSourceClosureObservationV1 {
+            observation_id: observation.observation_id.clone(),
+            observed_at: observation.observed_at,
+            record_retraction_status: observation.retraction_status,
+            projection,
+        };
+        let view = self.build_closure_view(recorded, tenant_id).await?;
+        view.validate()
+            .map_err(|error| invalid(&format!("invalid closure observation view: {error:?}")))?;
+        Ok(view)
+    }
+
+    /// The closure account for one subject as it reads now, tenant-filtered.
+    ///
+    /// Each recorded observation is given its own standing and read-time
+    /// freshness before the account is assembled, so a settlement withdrawn
+    /// from every observation individually cannot reappear in the subject's
+    /// account. A subject with no recorded closure observation yields
+    /// [`ClosureViewGeneration::PreClosure`], never an empty observation list.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for the same reasons as [`Self::subject_closure`], and
+    /// additionally when any observation's chain has no recorded index tip.
+    pub async fn subject_closure_view(
+        &self,
+        subject_ref: &str,
+        tenant_id: &str,
+    ) -> Result<SubjectClosureViewV1> {
+        let account = self.subject_closure(subject_ref, tenant_id).await?;
+        let observations = match account.closure_generation {
+            ClosureProfileGeneration::PreClosure { .. } => {
+                return Ok(SubjectClosureViewV1::pre_closure(account.subject_ref));
+            }
+            ClosureProfileGeneration::SourceClosureV2 { observations } => observations,
+        };
+        let mut views = Vec::with_capacity(observations.len());
+        for recorded in observations {
+            views.push(self.build_closure_view(recorded, tenant_id).await?);
+        }
+        let view = SubjectClosureViewV1 {
+            schema_version: tuppira_shared::SUBJECT_CLOSURE_VIEW_VERSION,
+            subject_ref: account.subject_ref,
+            closure_generation: ClosureViewGeneration::SourceClosureV2 {
+                observations: views,
+            },
+        };
+        view.validate()
+            .map_err(|error| invalid(&format!("invalid subject closure view: {error:?}")))?;
+        Ok(view)
+    }
+
+    /// The recorded index tip for one chain and network.
+    ///
+    /// # Errors
+    ///
+    /// [`TuppiraError::NotFound`] when no tip is recorded. This is deliberately
+    /// not a fallback to the tip inside the stored projection: that reading is
+    /// the collector's, and returning it as the read-time tip would present a
+    /// year-old closure as a current one — the exact substitution the view's
+    /// two freshness fields exist to prevent.
+    pub async fn closure_index_tip(
+        &self,
+        chain_id: &str,
+        network_id: &str,
+    ) -> Result<ClosureIndexTipRecord> {
+        ensure_text(chain_id, "chain_id")?;
+        ensure_text(network_id, "network_id")?;
+        let row = sqlx::query(
+            "SELECT indexed_tip_height, indexed_tip_block_id_hex, indexed_tip_observed_at \
+             FROM closure_index_tips WHERE chain_id = ? AND network_id = ?",
+        )
+        .bind(chain_id)
+        .bind(network_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| TuppiraError::NotFound {
+            entity_type: "closure_index_tip".into(),
+            id: format!("{chain_id}/{network_id}"),
+        })?;
+        let record = ClosureIndexTipRecord {
+            schema_version: tuppira_shared::CLOSURE_INDEX_TIP_RECORD_VERSION,
+            chain_id: chain_id.to_string(),
+            network_id: network_id.to_string(),
+            indexed_tip_height: to_u64(row.try_get("indexed_tip_height")?, "indexed_tip_height")?,
+            indexed_tip_block_id_hex: row.try_get("indexed_tip_block_id_hex")?,
+            indexed_tip_observed_at: to_u64(
+                row.try_get("indexed_tip_observed_at")?,
+                "indexed_tip_observed_at",
+            )?,
+        };
+        record
+            .validate()
+            .map_err(|error| invalid(&format!("invalid stored closure index tip: {error:?}")))?;
+        Ok(record)
+    }
+
+    /// Where one recorded observation stands after the reorganizations recorded
+    /// against it and against the closures it descends from.
+    ///
+    /// The two lists answer different questions and are kept apart: an
+    /// observation's own orphaning is about the block that carried it, an
+    /// orphaned ancestor is about the ground beneath it, and an observation can
+    /// carry both.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when more orphanings or orphaned ancestors exist than one
+    /// standing can report. Truncating either would understate how much of the
+    /// history was replaced, and this type has no way to say "partial".
+    pub async fn closure_reorg_standing(
+        &self,
+        observation_id: &str,
+        tenant_id: &str,
+    ) -> Result<ClosureReorgStanding> {
+        let projection = self.closure_observation(observation_id, tenant_id).await?;
+        self.reorg_standing_for(
+            observation_id,
+            &projection.consumed_state.transition_id_hex,
+            tenant_id,
+        )
+        .await
+    }
+
+    async fn build_closure_view(
+        &self,
+        recorded: RecordedSourceClosureObservationV1,
+        tenant_id: &str,
+    ) -> Result<ClosureObservationViewV1> {
+        let standing = self
+            .reorg_standing_for(
+                &recorded.observation_id,
+                &recorded.projection.consumed_state.transition_id_hex,
+                tenant_id,
+            )
+            .await?;
+        let tip = self
+            .closure_index_tip(
+                &recorded.projection.chain_id,
+                &recorded.projection.network_id,
+            )
+            .await?;
+        let read_index_freshness = tip.freshness_for(&recorded.projection.observed_checkpoint);
+        Ok(ClosureObservationViewV1::new(
+            recorded,
+            standing,
+            read_index_freshness,
+        ))
+    }
+
+    async fn reorg_standing_for(
+        &self,
+        observation_id: &str,
+        consumed_transition_id_hex: &str,
+        tenant_id: &str,
+    ) -> Result<ClosureReorgStanding> {
+        let own_orphanings = self.own_orphanings(observation_id).await?;
+        let (orphaned_ancestors, ancestry_coverage) = self
+            .orphaned_ancestors(observation_id, consumed_transition_id_hex, tenant_id)
+            .await?;
+        let standing = ClosureReorgStanding {
+            own_orphanings,
+            orphaned_ancestors,
+            ancestry_coverage,
+        };
+        standing
+            .validate()
+            .map_err(|error| invalid(&format!("invalid closure reorg standing: {error:?}")))?;
+        Ok(standing)
+    }
+
+    async fn own_orphanings(&self, observation_id: &str) -> Result<Vec<ClosureOrphaningReading>> {
+        let rows = sqlx::query(
+            "SELECT reorg_id, orphaned_at, disposition, superseding_observation_id \
+             FROM closure_observation_orphanings WHERE observation_id = ? \
+             ORDER BY orphaned_at, reorg_id",
+        )
+        .bind(observation_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut orphanings = Vec::with_capacity(rows.len());
+        for row in rows {
+            let reorg_id: String = row.try_get("reorg_id")?;
+            let disposition = match row.try_get::<String, _>("disposition")?.as_str() {
+                "superseded" => {
+                    let superseding_observation_id: Option<String> =
+                        row.try_get("superseding_observation_id")?;
+                    OrphanedClosureDisposition::Superseded {
+                        superseding_observation_id: superseding_observation_id.ok_or_else(|| {
+                            invalid("a superseded orphaning without its replacement")
+                        })?,
+                    }
+                }
+                "retracted" => OrphanedClosureDisposition::Retracted {
+                    reasons: sqlx::query_scalar::<_, String>(
+                        "SELECT reason FROM closure_observation_orphaning_reasons \
+                         WHERE reorg_id = ? AND observation_id = ? ORDER BY ordinal",
+                    )
+                    .bind(&reorg_id)
+                    .bind(observation_id)
+                    .fetch_all(&self.pool)
+                    .await?,
+                },
+                _ => return Err(invalid("unsupported closure orphaning disposition")),
+            };
+            orphanings.push(ClosureOrphaningReading {
+                reorg_id,
+                orphaned_at: to_u64(row.try_get("orphaned_at")?, "orphaned_at")?,
+                disposition,
+            });
+        }
+        Ok(orphanings)
+    }
+
+    /// Walk the reported closure linkage upward, collecting orphaned ancestors.
+    ///
+    /// The linkage is the one the observations themselves express: this
+    /// observation's consumed state names the transition an earlier observation
+    /// reported as its successor commitment. Tuppira does not decide whether
+    /// that linkage is protocol-valid — only Parwana's verifier can — so the
+    /// walk is used in one direction only, to carry doubt downward.
+    ///
+    /// The walk is bounded by [`MAX_CLOSURE_ANCESTRY_DEPTH`] and by a visited
+    /// set. Both are needed: the visited set stops a reported cycle from
+    /// looping, and the depth bound stops a long reported chain from turning
+    /// one read into an unbounded number of queries. Stopping with linkage left
+    /// to follow is reported as [`ClosureAncestryCoverage::TruncatedAtDepth`],
+    /// never as a completed walk.
+    async fn orphaned_ancestors(
+        &self,
+        observation_id: &str,
+        consumed_transition_id_hex: &str,
+        tenant_id: &str,
+    ) -> Result<(Vec<OrphanedAncestorReading>, ClosureAncestryCoverage)> {
+        let mut visited: BTreeSet<String> = BTreeSet::from([observation_id.to_string()]);
+        let mut frontier = vec![consumed_transition_id_hex.to_string()];
+        let mut ancestors: Vec<OrphanedAncestorReading> = Vec::new();
+        let mut depth = 0_u32;
+
+        while !frontier.is_empty() {
+            if depth >= MAX_CLOSURE_ANCESTRY_DEPTH {
+                return Ok((ancestors, ClosureAncestryCoverage::TruncatedAtDepth { depth }));
+            }
+            depth += 1;
+            let mut next: Vec<String> = Vec::new();
+            for commitment in &frontier {
+                let rows = sqlx::query(
+                    "SELECT c.observation_id, c.consumed_transition_id_hex, \
+                     EXISTS(SELECT 1 FROM closure_observation_orphanings p \
+                            WHERE p.observation_id = c.observation_id) AS is_orphaned \
+                     FROM closure_observations c \
+                     JOIN observations o ON o.observation_id = c.observation_id \
+                     WHERE c.successor_commitment_hex = ? \
+                       AND (o.visibility_scope = 'public' OR o.tenant_id = ?) \
+                     ORDER BY c.observation_id",
+                )
+                .bind(commitment)
+                .bind(tenant_id)
+                .fetch_all(&self.pool)
+                .await?;
+                for row in rows {
+                    let ancestor_id: String = row.try_get("observation_id")?;
+                    if !visited.insert(ancestor_id.clone()) {
+                        continue;
+                    }
+                    if row.try_get::<i64, _>("is_orphaned")? != 0 {
+                        // A subject whose ancestry carries more orphaned
+                        // closures than a standing can report is not a subject
+                        // to answer partially: the omitted ones are exactly the
+                        // doubt the caller asked about.
+                        if ancestors.len() >= tuppira_shared::MAX_OBSERVATION_REFS {
+                            return Err(invalid(
+                                "closure ancestry carries more orphaned ancestors than one standing can report",
+                            ));
+                        }
+                        ancestors.push(OrphanedAncestorReading {
+                            observation_id: ancestor_id,
+                            successor_commitment_hex: commitment.clone(),
+                            depth,
+                        });
+                    }
+                    let parent: String = row.try_get("consumed_transition_id_hex")?;
+                    if !next.contains(&parent) {
+                        next.push(parent);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        Ok((ancestors, ClosureAncestryCoverage::Complete))
     }
 
     /// The chain evidence behind one normalized closure, tenant-filtered.
@@ -590,6 +1023,42 @@ async fn insert_closure_evidence(
     Ok(())
 }
 
+/// Record an index tip, keeping the recorded one when it is already higher.
+///
+/// The `WHERE` clause is what makes this an advance rather than a write. The
+/// `closure_index_tips_advance_only` trigger would abort a lowering update, and
+/// aborting is right for a direct `UPDATE`; here it would fail an otherwise
+/// valid observation append because a connector read blocks out of order. So a
+/// lower reading is discarded and reported as "did not advance" instead.
+async fn upsert_closure_index_tip(
+    transaction: &mut Transaction<'_, Sqlite>,
+    record: &ClosureIndexTipRecord,
+) -> Result<bool> {
+    let outcome = sqlx::query(
+        "INSERT INTO closure_index_tips (chain_id, network_id, indexed_tip_height, indexed_tip_block_id_hex, indexed_tip_observed_at) \
+         VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT(chain_id, network_id) DO UPDATE SET \
+           indexed_tip_height = excluded.indexed_tip_height, \
+           indexed_tip_block_id_hex = excluded.indexed_tip_block_id_hex, \
+           indexed_tip_observed_at = excluded.indexed_tip_observed_at \
+         WHERE excluded.indexed_tip_height > closure_index_tips.indexed_tip_height",
+    )
+    .bind(&record.chain_id)
+    .bind(&record.network_id)
+    .bind(required_i64(
+        record.indexed_tip_height,
+        "indexed_tip_height",
+    )?)
+    .bind(&record.indexed_tip_block_id_hex)
+    .bind(required_i64(
+        record.indexed_tip_observed_at,
+        "indexed_tip_observed_at",
+    )?)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(outcome.rows_affected() > 0)
+}
+
 fn decode_closure_projection(
     payload: &str,
     observation: &ObservationRecord,
@@ -791,6 +1260,7 @@ fn invalid(message: &str) -> TuppiraError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tuppira_shared::ClosureObservationState;
     use tuppira_shared::OBSERVATION_SCHEMA_VERSION;
 
     async fn repository() -> Result<ObservationRepository> {
@@ -1685,5 +2155,597 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    // ── Reorganization standing and reorg-aware views (TUP-NE-004) ───────────
+
+    /// A reorganization on the same source as the observations above, so the
+    /// `closure_orphanings_match_reorg_source` trigger is satisfied.
+    async fn add_reorg(repository: &ObservationRepository, reorg_id: &str, source_id: &str) {
+        let reorg = ReorgRecord {
+            schema_version: 1,
+            reorg_id: reorg_id.into(),
+            source_id: source_id.into(),
+            detected_at: 13,
+            prior_tip: "block:100:a".into(),
+            replacement_tip: "block:100:b".into(),
+        };
+        assert!(repository.append_reorg(&reorg).await.is_ok());
+    }
+
+    fn retraction(reorg_id: &str, observation_id: &str) -> ClosureObservationOrphaningRecord {
+        ClosureObservationOrphaningRecord {
+            schema_version: tuppira_shared::CLOSURE_ORPHANING_RECORD_VERSION,
+            reorg_id: reorg_id.into(),
+            observation_id: observation_id.into(),
+            orphaned_at: 14,
+            disposition: OrphanedClosureDisposition::Retracted {
+                reasons: vec!["the closure did not reappear on the replacement history".into()],
+            },
+        }
+    }
+
+    fn index_tip(height: u64) -> ClosureIndexTipRecord {
+        ClosureIndexTipRecord {
+            schema_version: tuppira_shared::CLOSURE_INDEX_TIP_RECORD_VERSION,
+            chain_id: "ethereum".into(),
+            network_id: "sepolia".into(),
+            indexed_tip_height: height,
+            indexed_tip_block_id_hex: "cafe".into(),
+            indexed_tip_observed_at: 1_760_009_000,
+        }
+    }
+
+    /// The core of the ticket: a reorganization must place a statement *beside*
+    /// the observation, never edit or delete it. The stored closure has to read
+    /// back byte-identical while the view over it stops claiming settlement.
+    #[tokio::test]
+    async fn an_orphaning_is_recorded_beside_the_observation_and_never_deletes_it() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+        add_reorg(&repository, "reorg:closure:1", "source:piteka").await;
+        assert!(
+            repository
+                .record_closure_orphaning(&retraction("reorg:closure:1", "obs:closure:1"))
+                .await
+                .is_ok()
+        );
+
+        // The source's original statement survives exactly as recorded.
+        assert_eq!(
+            repository
+                .closure_observation("obs:closure:1", "tenant:acme")
+                .await
+                .ok(),
+            Some(projection),
+        );
+
+        let Ok(view) = repository
+            .closure_observation_view("obs:closure:1", "tenant:acme")
+            .await
+        else {
+            panic!("an orphaned closure must still be readable");
+        };
+        assert!(view.reorg_standing.is_orphaned());
+        assert!(view.reorg_standing.is_retracted());
+        // The finality report was about a checkpoint on a replaced history.
+        assert!(!view.established_states.contains(&ClosureObservationState::Final));
+        assert!(view.established_states.contains(&ClosureObservationState::Unknown));
+        assert!(view.established_states.contains(&ClosureObservationState::Revoked));
+        // And what was observed stays observed.
+        assert!(view.established_states.contains(&ClosureObservationState::Observed));
+    }
+
+    /// A supersession withdraws nothing: the source reported the closure again
+    /// on the replacement history. Only the settlement goes, because this
+    /// observation's checkpoint is still on the history that was replaced.
+    #[tokio::test]
+    async fn a_superseded_closure_is_not_reported_as_revoked() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let original = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        assert!(
+            repository
+                .append_closure_observation(&original, &projection, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+        let replacement = closure_observation_record("obs:closure:2", "sanad:1", &projection);
+        assert!(
+            repository
+                .append_closure_observation(&replacement, &projection, None, &cursor(13))
+                .await
+                .is_ok()
+        );
+        add_reorg(&repository, "reorg:closure:1", "source:piteka").await;
+        assert!(
+            repository
+                .record_closure_orphaning(&ClosureObservationOrphaningRecord {
+                    disposition: OrphanedClosureDisposition::Superseded {
+                        superseding_observation_id: "obs:closure:2".into(),
+                    },
+                    ..retraction("reorg:closure:1", "obs:closure:1")
+                })
+                .await
+                .is_ok()
+        );
+
+        let Ok(view) = repository
+            .closure_observation_view("obs:closure:1", "tenant:acme")
+            .await
+        else {
+            panic!("a superseded closure must still be readable");
+        };
+        assert!(view.reorg_standing.is_orphaned());
+        assert!(!view.reorg_standing.is_retracted());
+        assert!(!view.established_states.contains(&ClosureObservationState::Revoked));
+        assert!(!view.established_states.contains(&ClosureObservationState::Final));
+        let [orphaning] = view.reorg_standing.own_orphanings.as_slice() else {
+            panic!("exactly one orphaning was recorded");
+        };
+        assert_eq!(
+            orphaning.disposition,
+            OrphanedClosureDisposition::Superseded {
+                superseding_observation_id: "obs:closure:2".into(),
+            },
+        );
+    }
+
+    /// Doubt travels downward along the linkage the observations themselves
+    /// report, even though the descendant was never orphaned itself.
+    #[tokio::test]
+    async fn a_descendant_of_an_orphaned_closure_stops_reporting_settlement() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let ancestor_projection = closure_projection();
+        let ancestor =
+            closure_observation_record("obs:closure:ancestor", "sanad:1", &ancestor_projection);
+        assert!(
+            repository
+                .append_closure_observation(&ancestor, &ancestor_projection, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+
+        // The descendant consumes the state the ancestor committed to as its
+        // successor. That is the whole of the reported linkage.
+        let mut descendant_projection = closure_projection();
+        descendant_projection.consumed_state.transition_id_hex =
+            ancestor_projection.closure_identity.successor_commitment_hex.clone();
+        descendant_projection.closure_identity.successor_commitment_hex = "33".repeat(32);
+        descendant_projection.closure_identity.closure_identity_hex = "0a1b2c3d".into();
+        let descendant = closure_observation_record(
+            "obs:closure:descendant",
+            "sanad:2",
+            &descendant_projection,
+        );
+        assert!(
+            repository
+                .append_closure_observation(
+                    &descendant,
+                    &descendant_projection,
+                    None,
+                    &cursor(13)
+                )
+                .await
+                .is_ok()
+        );
+
+        // Before the reorganization the descendant stands on its own.
+        let Ok(before) = repository
+            .closure_observation_view("obs:closure:descendant", "tenant:acme")
+            .await
+        else {
+            panic!("the descendant must be readable");
+        };
+        assert!(!before.reorg_standing.descends_from_orphaned());
+        assert!(before.established_states.contains(&ClosureObservationState::Final));
+
+        add_reorg(&repository, "reorg:closure:1", "source:piteka").await;
+        assert!(
+            repository
+                .record_closure_orphaning(&retraction(
+                    "reorg:closure:1",
+                    "obs:closure:ancestor"
+                ))
+                .await
+                .is_ok()
+        );
+
+        let Ok(after) = repository
+            .closure_observation_view("obs:closure:descendant", "tenant:acme")
+            .await
+        else {
+            panic!("the descendant must still be readable");
+        };
+        // Never orphaned itself, but its ground was replaced.
+        assert!(!after.reorg_standing.is_orphaned());
+        assert!(after.reorg_standing.descends_from_orphaned());
+        assert!(!after.established_states.contains(&ClosureObservationState::Final));
+        assert!(after.established_states.contains(&ClosureObservationState::Unknown));
+        // An ancestor's retraction is not this closure's revocation.
+        assert!(!after.established_states.contains(&ClosureObservationState::Revoked));
+        let [reading] = after.reorg_standing.orphaned_ancestors.as_slice() else {
+            panic!("exactly one orphaned ancestor was reachable");
+        };
+        assert_eq!(reading.observation_id, "obs:closure:ancestor");
+        assert_eq!(reading.depth, 1);
+        assert_eq!(
+            reading.successor_commitment_hex,
+            ancestor_projection.closure_identity.successor_commitment_hex,
+        );
+        assert_eq!(
+            after.reorg_standing.ancestry_coverage,
+            ClosureAncestryCoverage::Complete,
+        );
+    }
+
+    /// The subject account must not resurrect a settlement its observations no
+    /// longer individually establish.
+    #[tokio::test]
+    async fn a_subject_view_does_not_resurrect_a_withdrawn_settlement() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+        add_reorg(&repository, "reorg:closure:1", "source:piteka").await;
+        assert!(
+            repository
+                .record_closure_orphaning(&retraction("reorg:closure:1", "obs:closure:1"))
+                .await
+                .is_ok()
+        );
+
+        // The stored account still reports what was committed …
+        let Ok(stored) = repository.subject_closure("sanad:1", "tenant:acme").await else {
+            panic!("the stored account must remain readable");
+        };
+        assert!(stored.established_states().contains(&ClosureObservationState::Final));
+
+        // … and the view over it reports what that still supports.
+        let Ok(view) = repository.subject_closure_view("sanad:1", "tenant:acme").await else {
+            panic!("the subject view must be readable");
+        };
+        let states = view.established_states();
+        assert!(!states.contains(&ClosureObservationState::Final));
+        assert!(states.contains(&ClosureObservationState::Unknown));
+    }
+
+    /// Acceptance criterion: every closure view carries the indexed tip and lag,
+    /// measured at read time rather than copied from the collector's reading.
+    #[tokio::test]
+    async fn a_closure_view_reports_the_current_tip_and_not_the_collectors() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+        // The collector saw tip 1_000 against a checkpoint at 900.
+        assert_eq!(projection.index_freshness.indexed_tip_height, 1_000);
+
+        assert_eq!(
+            repository.advance_closure_index_tip(&index_tip(5_000)).await.ok(),
+            Some(true)
+        );
+        let Ok(view) = repository
+            .closure_observation_view("obs:closure:1", "tenant:acme")
+            .await
+        else {
+            panic!("the closure view must be readable");
+        };
+
+        assert_eq!(view.read_index_freshness.indexed_tip_height, 5_000);
+        assert_eq!(
+            view.read_index_freshness.lag_blocks,
+            ObservedOrMissing::Observed { value: 4_100 },
+        );
+        // The collector's own reading is untouched inside the recorded payload.
+        assert_eq!(
+            view.recorded.projection.index_freshness,
+            projection.index_freshness,
+        );
+    }
+
+    /// A lag that could shrink without the index catching up is not a lag.
+    #[tokio::test]
+    async fn the_indexed_tip_never_moves_backwards() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        assert_eq!(
+            repository.advance_closure_index_tip(&index_tip(5_000)).await.ok(),
+            Some(true)
+        );
+        // Discarded rather than rejected: connectors read blocks out of order,
+        // and a stale reading must not fail an otherwise valid append.
+        assert_eq!(
+            repository.advance_closure_index_tip(&index_tip(4_000)).await.ok(),
+            Some(false)
+        );
+        assert_eq!(
+            repository
+                .closure_index_tip("ethereum", "sepolia")
+                .await
+                .map(|tip| tip.indexed_tip_height)
+                .ok(),
+            Some(5_000),
+        );
+    }
+
+    /// The database is the second enforcement of the invariants the typed
+    /// boundary checks, for every caller including a future one.
+    #[tokio::test]
+    async fn the_database_rejects_orphanings_no_source_could_have_reported() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+
+        // A reorganization on another source would let one connector withdraw
+        // evidence it never collected.
+        add_source(&repository, "source:other", "run:other").await;
+        add_reorg(&repository, "reorg:foreign", "source:other").await;
+        assert!(
+            repository
+                .record_closure_orphaning(&retraction("reorg:foreign", "obs:closure:1"))
+                .await
+                .is_err()
+        );
+
+        // An orphaning before the observation describes an order of events that
+        // did not happen.
+        add_reorg(&repository, "reorg:closure:1", "source:piteka").await;
+        assert!(
+            repository
+                .record_closure_orphaning(&ClosureObservationOrphaningRecord {
+                    orphaned_at: 1,
+                    ..retraction("reorg:closure:1", "obs:closure:1")
+                })
+                .await
+                .is_err()
+        );
+
+        // An observation carrying no closure statement has no closure to orphan.
+        let plain = observation("obs:plain", 3, None);
+        assert!(repository.append_observation(&plain, &cursor(13)).await.is_ok());
+        assert!(
+            repository
+                .record_closure_orphaning(&retraction("reorg:closure:1", "obs:plain"))
+                .await
+                .is_err()
+        );
+    }
+
+    /// A replacement is the same closure re-reported. One closing a different
+    /// state would silently move the subject of the source's statement.
+    #[tokio::test]
+    async fn a_replacement_must_close_the_same_consumed_state() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let original = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        assert!(
+            repository
+                .append_closure_observation(&original, &projection, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+        let mut other_state = closure_projection();
+        other_state.consumed_state.output_index = 7;
+        let unrelated = closure_observation_record("obs:closure:other", "sanad:1", &other_state);
+        assert!(
+            repository
+                .append_closure_observation(&unrelated, &other_state, None, &cursor(13))
+                .await
+                .is_ok()
+        );
+        add_reorg(&repository, "reorg:closure:1", "source:piteka").await;
+
+        assert!(
+            repository
+                .record_closure_orphaning(&ClosureObservationOrphaningRecord {
+                    disposition: OrphanedClosureDisposition::Superseded {
+                        superseding_observation_id: "obs:closure:other".into(),
+                    },
+                    ..retraction("reorg:closure:1", "obs:closure:1")
+                })
+                .await
+                .is_err()
+        );
+    }
+
+    /// Reorganization history is corrected by recording the next one, never by
+    /// rewriting the last.
+    #[tokio::test]
+    async fn recorded_orphanings_cannot_be_rewritten_or_removed() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+        add_reorg(&repository, "reorg:closure:1", "source:piteka").await;
+        assert!(
+            repository
+                .record_closure_orphaning(&retraction("reorg:closure:1", "obs:closure:1"))
+                .await
+                .is_ok()
+        );
+
+        let update = sqlx::query(
+            "UPDATE closure_observation_orphanings SET disposition = 'superseded' WHERE observation_id = 'obs:closure:1'",
+        )
+        .execute(&repository.pool)
+        .await;
+        assert!(update.is_err());
+        let delete =
+            sqlx::query("DELETE FROM closure_observation_orphanings WHERE observation_id = 'obs:closure:1'")
+                .execute(&repository.pool)
+                .await;
+        assert!(delete.is_err());
+        // A reason filed against a supersession would read as a withdrawal the
+        // source never made.
+        let reason = sqlx::query(
+            "INSERT INTO closure_observation_orphaning_reasons (reorg_id, observation_id, ordinal, reason) \
+             VALUES ('reorg:closure:1', 'obs:closure:1', 9, 'invented')",
+        )
+        .execute(&repository.pool)
+        .await;
+        assert!(reason.is_ok(), "this orphaning is a retraction, so reasons belong to it");
+    }
+
+    /// The ancestry walk is tenant-filtered, and that has a cost worth pinning.
+    ///
+    /// An ancestor the reading tenant cannot see is not walked, so a descendant
+    /// whose ground was replaced in another tenant's data reports a *clean*
+    /// standing. The standing therefore understates doubt at a tenant boundary.
+    /// That is the deliberate choice: the alternative is disclosing the
+    /// existence, identity, and reorganization history of another tenant's
+    /// observations, which is a worse failure than an understated standing. The
+    /// test exists so the trade-off cannot be changed silently.
+    #[tokio::test]
+    async fn the_ancestry_walk_stays_inside_the_tenant_boundary() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let ancestor_projection = closure_projection();
+        let ancestor =
+            closure_observation_record("obs:closure:ancestor", "sanad:1", &ancestor_projection);
+        assert!(
+            repository
+                .append_closure_observation(&ancestor, &ancestor_projection, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+        let mut descendant_projection = closure_projection();
+        descendant_projection.consumed_state.transition_id_hex =
+            ancestor_projection.closure_identity.successor_commitment_hex.clone();
+        descendant_projection.closure_identity.successor_commitment_hex = "33".repeat(32);
+        descendant_projection.closure_identity.closure_identity_hex = "0a1b2c3d".into();
+        let mut descendant = closure_observation_record(
+            "obs:closure:descendant",
+            "sanad:2",
+            &descendant_projection,
+        );
+        descendant.tenant_visibility = TenantVisibility::Tenant {
+            tenant_id: "tenant:other".into(),
+        };
+        assert!(
+            repository
+                .append_closure_observation(
+                    &descendant,
+                    &descendant_projection,
+                    None,
+                    &cursor(13)
+                )
+                .await
+                .is_ok()
+        );
+        add_reorg(&repository, "reorg:closure:1", "source:piteka").await;
+        assert!(
+            repository
+                .record_closure_orphaning(&retraction(
+                    "reorg:closure:1",
+                    "obs:closure:ancestor"
+                ))
+                .await
+                .is_ok()
+        );
+
+        // `tenant:other` owns the descendant but cannot see the ancestor, so
+        // the orphaning is not reachable and the standing reads clean.
+        let Ok(reader) = repository
+            .closure_observation_view("obs:closure:descendant", "tenant:other")
+            .await
+        else {
+            panic!("the owning tenant must see its own observation");
+        };
+        assert!(!reader.reorg_standing.descends_from_orphaned());
+        assert!(reader.reorg_standing.orphaned_ancestors.is_empty());
+
+        // The ancestor's own tenant sees the orphaning, on the ancestor itself.
+        let Ok(ancestor_view) = repository
+            .closure_observation_view("obs:closure:ancestor", "tenant:acme")
+            .await
+        else {
+            panic!("the ancestor's tenant must see its own observation");
+        };
+        assert!(ancestor_view.reorg_standing.is_orphaned());
+
+        // And the descendant is not reachable from the other tenant at all.
+        assert!(
+            repository
+                .closure_observation_view("obs:closure:descendant", "tenant:acme")
+                .await
+                .is_err()
+        );
+    }
+
+    /// A closure on a chain with no recorded tip fails closed rather than
+    /// falling back to the collector's reading, which would present a stale
+    /// closure as a current one.
+    #[tokio::test]
+    async fn a_view_without_a_recorded_index_tip_fails_closed() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let projection = closure_projection();
+        let record = closure_observation_record("obs:closure:1", "sanad:1", &projection);
+        assert!(
+            repository
+                .append_closure_observation(&record, &projection, None, &cursor(12))
+                .await
+                .is_ok()
+        );
+        // The append records the tip, so the view is readable …
+        assert!(
+            repository
+                .closure_observation_view("obs:closure:1", "tenant:acme")
+                .await
+                .is_ok()
+        );
+        // … and a chain with no tip at all is an explicit absence.
+        assert!(matches!(
+            repository.closure_index_tip("solana", "mainnet").await,
+            Err(TuppiraError::NotFound { .. })
+        ));
     }
 }

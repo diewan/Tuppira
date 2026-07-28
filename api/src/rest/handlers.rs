@@ -241,12 +241,12 @@ pub async fn observation_closure(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
     let access = crate::access::authenticate(&headers).map_err(auth_error)?;
     let repository = ObservationRepository::new(pool);
-    let record = repository
-        .get_visible_observation(&id, &access.tenant_id)
-        .await
-        .map_err(tuppira_error)?;
-    let projection = repository
-        .closure_observation(&id, &access.tenant_id)
+    // The reorg-aware view, not the bare projection: an observation whose
+    // history a reorganization replaced must not report `final` here, and a
+    // read must say how far behind the index is *now* rather than only how far
+    // behind it was when the collector produced the projection (TUP-NE-004).
+    let view = repository
+        .closure_observation_view(&id, &access.tenant_id)
         .await
         .map_err(tuppira_error)?;
     // The way back to the chain event, when the closure came from one. A
@@ -262,14 +262,25 @@ pub async fn observation_closure(
     };
     Ok(Json(ApiResponse::from(serde_json::json!({
         "observation_id": id,
-        "observed_at": record.observed_at,
+        "observed_at": view.recorded.observed_at,
         // The collector withdrawing the record and the source withdrawing the
         // closure are different events; the second lives inside `payload`.
-        "record_retraction_status": format!("{:?}", record.retraction_status).to_lowercase(),
+        "record_retraction_status":
+            format!("{:?}", view.recorded.record_retraction_status).to_lowercase(),
         "profile_id": tuppira_shared::SOURCE_CLOSURE_OBSERVATION_PROFILE_ID,
-        "profile_version": projection.schema_version,
-        "established_states": projection.established_states(),
-        "payload": projection,
+        "profile_version": view.recorded.projection.schema_version,
+        // Versions the three reorg-aware fields below. `profile_version` above
+        // versions `payload` and did not change when they were added.
+        "view_version": view.schema_version,
+        // What the observation *still* establishes. Never `final` on a replaced
+        // history; a consumer that wants the source's original statement reads
+        // `payload`.
+        "established_states": view.established_states,
+        "reorg_standing": view.reorg_standing,
+        // Index freshness now, distinct from `payload.index_freshness`, which
+        // is what the collector measured when the projection was produced.
+        "read_index_freshness": view.read_index_freshness,
+        "payload": view.recorded.projection,
         "chain_evidence": chain_evidence
     }))))
 }
@@ -294,12 +305,15 @@ pub async fn subject_closure(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
     let access = crate::access::authenticate(&headers).map_err(auth_error)?;
     let account = ObservationRepository::new(pool)
-        .subject_closure(&query.subject_ref, &access.tenant_id)
+        .subject_closure_view(&query.subject_ref, &access.tenant_id)
         .await
         .map_err(tuppira_error)?;
+    // The union of the per-observation sets *after* each has had its standing
+    // applied. Unioning the stored sets instead would let a settlement
+    // withdrawn from every observation individually reappear here.
     let established_states = account.established_states();
     Ok(Json(ApiResponse::from(serde_json::json!({
-        "profile_id": tuppira_shared::SUBJECT_CLOSURE_PROJECTION_PROFILE_ID,
+        "profile_id": tuppira_shared::SUBJECT_CLOSURE_VIEW_PROFILE_ID,
         "schema_version": account.schema_version,
         "subject_ref": account.subject_ref,
         "closure_generation": account.closure_generation,
