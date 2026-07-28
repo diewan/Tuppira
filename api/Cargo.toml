@@ -15,6 +15,7 @@ workspace = true
 tuppira-shared = { path = "../shared" }
 tuppira-storage = { path = "../storage" }
 tuppira-indexer = { path = "../indexer" }
+csv-sdk = { path = "../../parwana/csv-sdk", default-features = false, features = ["client"] }
 tokio.workspace = true
 futures.workspace = true
 axum.workspace = true

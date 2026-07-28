@@ -4152,6 +4152,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "csv-sdk",
  "futures",
  "hex",
  "prometheus",
