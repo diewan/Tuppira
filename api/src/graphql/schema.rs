@@ -107,6 +107,76 @@ impl Query {
         Ok(view)
     }
 
+    /// The closures competing for one consumed output, one page at a time.
+    ///
+    /// Competitors are observations. Whether any of them is closure-valid is
+    /// Parwana's verifier's answer, and this query neither computes nor implies
+    /// one. Read `coverage` before reading an empty competitor list: only
+    /// `recorded_set_exhausted` is about the recorded set, and even that is
+    /// bounded by the index freshness it carries rather than being uniqueness.
+    async fn closure_conflicts(
+        &self,
+        ctx: &Context<'_>,
+        consumed_transition_id_hex: String,
+        consumed_output_index: u32,
+        consumed_state_type: u16,
+        successor_commitment_hex: String,
+        resume_after_observation_id: Option<String>,
+    ) -> Result<ClosureConflictPageGql> {
+        let gql_ctx = ctx
+            .data::<GraphqlContext>()
+            .map_err(|_| Error::new("API context unavailable"))?;
+        let access = ctx
+            .data::<crate::access::ObservationAccess>()
+            .map_err(|_| Error::new("observation authentication required"))?;
+        ObservationRepository::new(gql_ctx.pool.clone())
+            .closure_conflicts(
+                &tuppira_shared::ConsumedStateReading {
+                    transition_id_hex: consumed_transition_id_hex,
+                    output_index: consumed_output_index,
+                    state_type: consumed_state_type,
+                },
+                &successor_commitment_hex,
+                resume_after_observation_id.as_deref(),
+                &access.tenant_id,
+            )
+            .await
+            .map(Into::into)
+            .map_err(|error| Error::new(error.to_string()))
+    }
+
+    /// The closures observed downstream of one source state.
+    ///
+    /// Walks source state → attempted successors → closure observations →
+    /// outputs. An empty walk means no closure was observed on the root state;
+    /// it is never a statement that the state is unspent.
+    async fn closure_lineage(
+        &self,
+        ctx: &Context<'_>,
+        transition_id_hex: String,
+        output_index: u32,
+        state_type: u16,
+    ) -> Result<ClosureLineageGql> {
+        let gql_ctx = ctx
+            .data::<GraphqlContext>()
+            .map_err(|_| Error::new("API context unavailable"))?;
+        let access = ctx
+            .data::<crate::access::ObservationAccess>()
+            .map_err(|_| Error::new("observation authentication required"))?;
+        ObservationRepository::new(gql_ctx.pool.clone())
+            .closure_lineage(
+                &tuppira_shared::ConsumedStateReading {
+                    transition_id_hex,
+                    output_index,
+                    state_type,
+                },
+                &access.tenant_id,
+            )
+            .await
+            .map(Into::into)
+            .map_err(|error| Error::new(error.to_string()))
+    }
+
     async fn observation_source_health(
         &self,
         ctx: &Context<'_>,
@@ -862,10 +932,148 @@ mod tests {
         for operation in [
             "{ subjectClosure(subjectRef: \"sanad:1\") { generation } }",
             "{ closureObservation(observationId: \"obs:1\") { observationId } }",
+            "{ closureLineage(transitionIdHex: \"11\", outputIndex: 0, stateType: 1) \
+             { coverage } }",
+            "{ closureConflicts(consumedTransitionIdHex: \"11\", consumedOutputIndex: 0, \
+             consumedStateType: 1, successorCommitmentHex: \"22\") { coverage } }",
         ] {
             let denied = schema.execute(operation).await;
             assert_eq!(denied.errors.len(), 1);
             assert!(denied.errors[0].message.contains("authentication required"));
         }
+    }
+
+    // ── Conflict and lineage queries (TUP-NE-005) ────────────────────────────
+
+    /// The investigation reads must not acquire the vocabulary of a verdict.
+    ///
+    /// Tuppira observes; it never computes an authoritative conclusion
+    /// (`development/ARCHITECTURE.md` §5.2). A *field* named for validity or a
+    /// winner would make the read look like an answer only Parwana's verifier
+    /// can give, so the field names are pinned here. Descriptions are excluded
+    /// on purpose: the prose has to be able to say what a field does not mean,
+    /// and "not evidence it is unspent" is exactly the sentence this rule
+    /// exists to make true.
+    #[tokio::test]
+    async fn the_investigation_reads_carry_no_verdict_vocabulary() {
+        let schema = Schema::build(Query, Mutation, Subscription).finish();
+        let sdl = schema.sdl();
+        for type_name in [
+            "type ClosureLineageGql {",
+            "type ClosureLineageStepGql {",
+            "type ClosureConflictPageGql {",
+            "type CompetingClosureGql {",
+        ] {
+            let Some(start) = sdl.find(type_name) else {
+                panic!("{type_name} must exist");
+            };
+            let body = &sdl[start..];
+            let body = &body[..body.find("\n}").unwrap_or(body.len())];
+            let mut in_description = false;
+            let mut names: Vec<&str> = Vec::new();
+            for line in body.lines().skip(1).map(str::trim) {
+                // `"""` opens and closes a description block; everything inside
+                // it is prose and is not a field name.
+                if line.starts_with("\"\"\"") {
+                    // A one-line `"""text"""` description opens and closes at
+                    // once; a bare `"""` toggles the block.
+                    if !(line.len() > 3 && line.ends_with("\"\"\"")) {
+                        in_description = !in_description;
+                    }
+                    continue;
+                }
+                if in_description || line.is_empty() {
+                    continue;
+                }
+                if let Some(name) = line.split(&['(', ':'][..]).next() {
+                    names.push(name);
+                }
+            }
+            let field_names = names.join(" ").to_ascii_lowercase();
+            // A description-stripping bug that ate the fields too would make
+            // every assertion below pass without checking anything.
+            assert!(
+                names.len() >= 3,
+                "{type_name} parsed to too few fields to be checking anything: {field_names}"
+            );
+            for forbidden in ["valid", "verdict", "winner", "unique", "unspent", "proven"] {
+                assert!(
+                    !field_names.contains(forbidden),
+                    "{type_name} must not name a field `{forbidden}`: {field_names}"
+                );
+            }
+        }
+    }
+
+    /// Each answer must say how much it covered, beside what it found.
+    ///
+    /// An empty competitor list and an ended step list are the two readings a
+    /// consumer is most likely to over-trust, and the coverage field is the only
+    /// thing that separates "nothing is there" from "the search stopped".
+    #[tokio::test]
+    async fn every_investigation_read_reports_the_coverage_that_bounds_it() {
+        let schema = Schema::build(Query, Mutation, Subscription).finish();
+        let sdl = schema.sdl();
+
+        let Some(start) = sdl.find("type ClosureConflictPageGql {") else {
+            panic!("the conflict page must exist");
+        };
+        let page = &sdl[start..];
+        let page = &page[..page.find("\n}").unwrap_or(page.len())];
+        assert!(page.contains("coverage: String!"));
+        assert!(page.contains("searchedDomains: [ClosureIndexDomainFreshnessGql!]!"));
+        // Present only while pages remain, so it is nullable.
+        assert!(page.contains("resumeAfterObservationId: String"));
+        assert!(!page.contains("resumeAfterObservationId: String!"));
+
+        let Some(start) = sdl.find("type ClosureLineageGql {") else {
+            panic!("the lineage read must exist");
+        };
+        let lineage = &sdl[start..];
+        let lineage = &lineage[..lineage.find("\n}").unwrap_or(lineage.len())];
+        assert!(lineage.contains("coverage: String!"));
+        assert!(lineage.contains("coverageDepth: Int"));
+        assert!(!lineage.contains("coverageDepth: Int!"));
+
+        // A step reports what its reorganization standing leaves established,
+        // and the outputs whose consumption was actually observed.
+        let Some(start) = sdl.find("type ClosureLineageStepGql {") else {
+            panic!("the lineage step must exist");
+        };
+        let step = &sdl[start..];
+        let step = &step[..step.find("\n}").unwrap_or(step.len())];
+        assert!(step.contains("reorgStanding: ClosureReorgStandingGql!"));
+        assert!(step.contains("establishedStates: [String!]!"));
+        assert!(step.contains("observedConsumedOutputs: [ClosureConsumedOutputGql!]!"));
+    }
+
+    /// An unobserved root state answers with an empty walk, not with silence and
+    /// not with a claim about the state.
+    #[tokio::test]
+    async fn an_unobserved_root_state_reads_as_an_empty_walk_over_graphql() {
+        let Ok(pool) = tuppira_storage::init_pool("sqlite::memory:", 1).await else {
+            return;
+        };
+        let Ok(feed) = crate::feed::WalletFeedHub::from_pool(pool.clone()).await else {
+            return;
+        };
+        let schema = create_schema(GraphqlContext { pool, feed }, true);
+        let response = schema
+            .execute(
+                async_graphql::Request::new(format!(
+                    "{{ closureLineage(transitionIdHex: \"{}\", outputIndex: 0, stateType: 1) \
+                     {{ coverage steps {{ observationId }} }} }}",
+                    "ab".repeat(32)
+                ))
+                .data(crate::access::ObservationAccess {
+                    tenant_id: "tenant:acme".to_string(),
+                }),
+            )
+            .await;
+
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let lineage = &response.data.into_json().unwrap_or_default()["closureLineage"];
+        assert_eq!(lineage["coverage"], "complete");
+        assert_eq!(lineage["steps"], serde_json::json!([]));
     }
 }

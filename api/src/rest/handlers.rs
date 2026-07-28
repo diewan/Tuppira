@@ -321,6 +321,95 @@ pub async fn subject_closure(
     }))))
 }
 
+// ---------------------------------------------------------------------------
+// Conflict and lineage investigation reads (TUP-NE-005)
+// ---------------------------------------------------------------------------
+
+/// Selector for the closures competing over one consumed output.
+#[derive(Deserialize)]
+pub struct ClosureConflictQuery {
+    /// Identifier of the transition that created the consumed output.
+    pub consumed_transition_id_hex: String,
+    /// Index of the output within that transition.
+    pub consumed_output_index: u32,
+    /// State type the caller has for the output. Carried into the answer; the
+    /// search matches on the output's identity and not on this field.
+    pub consumed_state_type: u16,
+    /// The successor whose competitors are sought.
+    pub successor_commitment_hex: String,
+    /// Cursor from a previous page's `resume_after_observation_id`.
+    pub resume_after_observation_id: Option<String>,
+}
+
+/// GET /api/v1/closure-conflicts?consumed_transition_id_hex=…
+///
+/// The closures competing for one consumed output, one page at a time. Every
+/// competitor is an observation; nothing here concludes which of them is
+/// closure-valid, because that verdict belongs to Parwana's verifier against a
+/// `VerificationContext` this plane does not hold.
+///
+/// An empty `competitors` list is only about the recorded set when `coverage` is
+/// `recorded_set_exhausted`, and even then it is bounded by `searched_domains`
+/// rather than being a uniqueness claim.
+pub async fn closure_conflicts(
+    headers: HeaderMap,
+    Query(query): Query<ClosureConflictQuery>,
+    State((_, pool, _, _)): State<AppState>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
+    let access = crate::access::authenticate(&headers).map_err(auth_error)?;
+    let page = ObservationRepository::new(pool)
+        .closure_conflicts(
+            &tuppira_shared::ConsumedStateReading {
+                transition_id_hex: query.consumed_transition_id_hex,
+                output_index: query.consumed_output_index,
+                state_type: query.consumed_state_type,
+            },
+            &query.successor_commitment_hex,
+            query.resume_after_observation_id.as_deref(),
+            &access.tenant_id,
+        )
+        .await
+        .map_err(tuppira_error)?;
+    Ok(Json(ApiResponse::from(serde_json::json!(page))))
+}
+
+/// Selector for a lineage walk's root state.
+#[derive(Deserialize)]
+pub struct ClosureLineageQuery {
+    /// Identifier of the transition that created the root output.
+    pub transition_id_hex: String,
+    /// Index of the output within that transition.
+    pub output_index: u32,
+    /// State type the caller has for the output.
+    pub state_type: u16,
+}
+
+/// GET /api/v1/closure-lineage?transition_id_hex=…
+///
+/// Walks source state → attempted successors → closure observations → outputs.
+/// An empty `steps` list means no closure was observed on the root state; it is
+/// never a statement that the state is unspent, and no field of the answer says
+/// a successor is valid.
+pub async fn closure_lineage(
+    headers: HeaderMap,
+    Query(query): Query<ClosureLineageQuery>,
+    State((_, pool, _, _)): State<AppState>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
+    let access = crate::access::authenticate(&headers).map_err(auth_error)?;
+    let lineage = ObservationRepository::new(pool)
+        .closure_lineage(
+            &tuppira_shared::ConsumedStateReading {
+                transition_id_hex: query.transition_id_hex,
+                output_index: query.output_index,
+                state_type: query.state_type,
+            },
+            &access.tenant_id,
+        )
+        .await
+        .map_err(tuppira_error)?;
+    Ok(Json(ApiResponse::from(serde_json::json!(lineage))))
+}
+
 fn auth_error(status: StatusCode) -> (StatusCode, Json<ErrorResponse>) {
     let message = if status == StatusCode::SERVICE_UNAVAILABLE {
         "observation authentication is not configured"

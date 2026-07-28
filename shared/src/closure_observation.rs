@@ -92,6 +92,21 @@ pub struct ConsumedStateReading {
 }
 
 impl ConsumedStateReading {
+    /// Whether both readings name the same single-use output.
+    ///
+    /// The output is identified by the transition that created it and its index
+    /// within that transition. `state_type` is deliberately excluded: it is a
+    /// description of the output that the *source* supplied, and Parwana checks
+    /// it against the parent's schema — a check this plane cannot perform,
+    /// holding no protocol state. Two sources that disagree about the state type
+    /// of one output are still talking about that one output, and comparing the
+    /// whole reading would let an equivocating reporter escape conflict
+    /// detection by varying a field nothing here can refute.
+    #[must_use]
+    pub fn identifies_same_output(&self, other: &Self) -> bool {
+        self.transition_id_hex == other.transition_id_hex && self.output_index == other.output_index
+    }
+
     fn validate(&self) -> Result<(), ObservationValidationError> {
         validate_hash_hex(&self.transition_id_hex, "consumed_state.transition_id_hex")
     }
@@ -751,6 +766,14 @@ pub struct CompetingClosureReading {
     pub closure_identity_hex: String,
     /// The successor commitment the competitor favours.
     pub successor_commitment_hex: String,
+    /// The state type the competitor's source reported for the consumed output.
+    ///
+    /// Carried because a competitor is matched on the output's identity and not
+    /// on this field (see [`ConsumedStateReading::identifies_same_output`]). A
+    /// value differing from the searched reading's is a disagreement between two
+    /// sources about what they consumed, which an investigator must be able to
+    /// see rather than have flattened away by the match.
+    pub consumed_state_type: u16,
 }
 
 /// What a search for closures competing for one consumed state found.
@@ -800,11 +823,17 @@ impl ClosureConflictSearchOutcome {
 
 /// Search recorded closure observations for competitors of one consumed state.
 ///
-/// A competitor is an observation of the *same* consumed state favouring a
+/// A competitor is an observation of the *same* consumed output favouring a
 /// *different* successor commitment: that pairing is what portable
 /// non-equivocation forbids, and observing it is the whole reason this plane
 /// indexes closures. Observations of the same successor are the same closure
 /// seen again and are not competitors.
+///
+/// "Same consumed output" is [`ConsumedStateReading::identifies_same_output`],
+/// not equality of the whole reading. A source that reports a different
+/// `state_type` for the output it consumed is still reporting a closure over
+/// that output, and matching on the full reading would let it escape this
+/// search by varying a field the observation plane cannot check.
 ///
 /// The result is never a uniqueness claim. See
 /// [`ClosureConflictSearchOutcome`].
@@ -817,7 +846,10 @@ pub fn assess_closure_conflicts(
 ) -> ClosureConflictSearchOutcome {
     let mut competitors: Vec<CompetingClosureReading> = Vec::new();
     for projection in observed {
-        if &projection.consumed_state != consumed_state {
+        if !projection
+            .consumed_state
+            .identifies_same_output(consumed_state)
+        {
             continue;
         }
         if projection.closure_identity.successor_commitment_hex == successor_commitment_hex {
@@ -832,6 +864,7 @@ pub fn assess_closure_conflicts(
                 .closure_identity
                 .successor_commitment_hex
                 .clone(),
+            consumed_state_type: projection.consumed_state.state_type,
         };
         if !competitors.contains(&competitor) {
             competitors.push(competitor);
@@ -1128,7 +1161,7 @@ impl ClosureReorgStanding {
 /// The states a closure observation still establishes once its reorganization
 /// standing is applied.
 ///
-/// Three rules, and each of them only ever moves a read toward uncertainty.
+/// Four rules, and each of them only ever moves a read toward uncertainty.
 ///
 /// **A replaced history cannot carry settlement.** The source's finality report
 /// was about a checkpoint on a history that no longer exists, so
@@ -1150,12 +1183,31 @@ impl ClosureReorgStanding {
 /// when the source reported that the closure did not reappear. A superseded
 /// closure is not revoked: the source reported it again, and the superseding
 /// observation carries that statement.
+///
+/// **An unfinished walk is a facet left unreported.** When
+/// [`ClosureAncestryCoverage::TruncatedAtDepth`] says the ancestry walk stopped
+/// with linkage still to follow, whether this observation descends from an
+/// orphaned closure is not known, so [`ClosureObservationState::Unknown`] is
+/// added. `Final` is *not* withdrawn: no reorganization was observed, and
+/// withdrawing settlement on a walk that merely ran long would fabricate one.
+/// The pairing is already in the vocabulary — a projection with a reported
+/// settlement and an unreported facet establishes both — and reading
+/// `ancestry_coverage` is how a caller learns which facet is missing. Without
+/// this rule a closure sixty-five links deep reads exactly like one whose
+/// ancestry was walked to the end, which is the understatement of doubt that
+/// [`ClosureAncestryCoverage`] exists to prevent.
 #[must_use]
 pub fn established_states_under_reorg(
     projection: &SourceClosureObservationProjectionV1,
     standing: &ClosureReorgStanding,
 ) -> BTreeSet<ClosureObservationState> {
     let mut states = projection.established_states();
+    if matches!(
+        standing.ancestry_coverage,
+        ClosureAncestryCoverage::TruncatedAtDepth { .. }
+    ) {
+        states.insert(ClosureObservationState::Unknown);
+    }
     if !standing.is_orphaned() && !standing.descends_from_orphaned() {
         return states;
     }
@@ -1480,6 +1532,366 @@ impl SubjectClosureViewV1 {
                 Ok(())
             }
         }
+    }
+}
+
+// ── Conflict and lineage queries over the recorded closures (TUP-NE-005) ────
+//
+// These are the query surface over what TUP-NE-002, TUP-NE-003, and TUP-NE-004
+// already record. Nothing here decides anything: the conflict page reports what
+// `assess_closure_conflicts` found, and the lineage walk follows linkage the
+// sources themselves reported. Whether a successor is *protocol-valid* is
+// Parwana's verifier's answer and appears nowhere in this section.
+
+/// The only closure-conflict page version understood by this release.
+pub const CLOSURE_CONFLICT_PAGE_VERSION: u16 = 1;
+
+/// Maximum competitors one conflict page carries.
+///
+/// A page exists because a consumed state under active equivocation can carry
+/// more closures than [`SubjectClosureProjectionV1`] will report at all — that
+/// projection fails closed above [`MAX_OBSERVATION_REFS`] rather than truncate,
+/// and this is the surface it directs such a subject to.
+pub const MAX_CLOSURE_CONFLICT_PAGE: usize = 64;
+
+/// Index freshness for one chain and network, as one term of a search bound.
+///
+/// A conflict search spans every chain the index holds, but an
+/// [`IndexFreshnessReading`] describes exactly one of them: its tip height and
+/// block identity are that chain's. Reporting one chain's reading as the bound
+/// of a cross-chain search would name a tip that most of the search never ran
+/// against, so each domain carries its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosureIndexDomainFreshness {
+    /// The chain this reading is on.
+    pub chain_id: String,
+    /// The network within that chain.
+    pub network_id: String,
+    /// How far behind that chain the index was when the search ran.
+    pub index_freshness: IndexFreshnessReading,
+}
+
+/// How much of the recorded set one conflict page covered.
+///
+/// The distinction is the whole point of the type. An empty `competitors` list
+/// means one thing when the page reached the end of what is recorded and
+/// nothing at all when pages remain, and a single "no conflicts" answer would
+/// collapse the two.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "coverage", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClosureConflictPageCoverage {
+    /// The page reached the end of the closures recorded for this consumed
+    /// output.
+    ///
+    /// Still not a uniqueness claim: each index covers its chain only to the
+    /// tip it has reached, and `searched_domains` is what bounds the answer —
+    /// the search is only as current as the laggiest index behind it. See
+    /// [`ClosureConflictSearchOutcome`], which refuses a `Unique` variant for
+    /// the same reason. An empty list means the page read no closure at all,
+    /// which bounds nothing and is weaker than any lag.
+    RecordedSetExhausted {
+        /// Freshness of every index domain the page relied on.
+        searched_domains: Vec<ClosureIndexDomainFreshness>,
+    },
+    /// Closures recorded for this consumed state were not read on this page.
+    ///
+    /// Competitors listed on the page are real; their absence is not, because
+    /// nothing here speaks for the closures still unread.
+    MorePagesRemain {
+        /// Observation identifier to resume the search after.
+        resume_after_observation_id: String,
+    },
+}
+
+/// One page of the closures competing for a consumed state.
+///
+/// Competitors are observations, never verdicts. Two sources reporting
+/// different successors for one consumed state is precisely the equivocation
+/// this plane exists to record, and recording it is not the same as choosing
+/// between them — that choice belongs to Parwana's verifier, against a
+/// `VerificationContext` this plane does not hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosureConflictPageV1 {
+    /// Page version; see [`CLOSURE_CONFLICT_PAGE_VERSION`].
+    pub schema_version: u16,
+    /// The consumed state the search was about.
+    pub consumed_state: ConsumedStateReading,
+    /// The successor whose competitors were sought.
+    pub successor_commitment_hex: String,
+    /// Competitors observed on this page, in the order the search returned them.
+    pub competitors: Vec<CompetingClosureReading>,
+    /// What this page covered. Read it before reading an empty list.
+    pub coverage: ClosureConflictPageCoverage,
+}
+
+impl ClosureConflictPageV1 {
+    /// Fail-closed validation for the storage and API boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObservationValidationError`] for an unsupported version, a
+    /// malformed identity, a page over its bound, a duplicated competitor, or a
+    /// competitor favouring the very successor the search was about — which
+    /// would report a closure as competing with itself.
+    pub fn validate(&self) -> Result<(), ObservationValidationError> {
+        if self.schema_version != CLOSURE_CONFLICT_PAGE_VERSION {
+            return Err(ObservationValidationError::UnsupportedVersion(
+                self.schema_version,
+            ));
+        }
+        self.consumed_state.validate()?;
+        validate_hash_hex(&self.successor_commitment_hex, "successor_commitment_hex")?;
+        if self.competitors.len() > MAX_CLOSURE_CONFLICT_PAGE {
+            return Err(ObservationValidationError::BoundsExceeded("competitors"));
+        }
+        let mut seen = BTreeSet::new();
+        for competitor in &self.competitors {
+            validate_name(&competitor.chain_id, "competitors.chain_id")?;
+            validate_name(&competitor.network_id, "competitors.network_id")?;
+            validate_name(&competitor.closure_kind, "competitors.closure_kind")?;
+            validate_native_hex(
+                &competitor.closure_identity_hex,
+                "competitors.closure_identity_hex",
+            )?;
+            validate_hash_hex(
+                &competitor.successor_commitment_hex,
+                "competitors.successor_commitment_hex",
+            )?;
+            if competitor.successor_commitment_hex == self.successor_commitment_hex {
+                return Err(ObservationValidationError::InvalidField(
+                    "competitors.successor_commitment_hex",
+                ));
+            }
+            if !seen.insert((
+                competitor.chain_id.as_str(),
+                competitor.closure_identity_hex.as_str(),
+            )) {
+                return Err(ObservationValidationError::DuplicateReference(
+                    "competitors.closure_identity_hex",
+                ));
+            }
+        }
+        match &self.coverage {
+            ClosureConflictPageCoverage::MorePagesRemain {
+                resume_after_observation_id,
+            } => validate_name(resume_after_observation_id, "coverage.resume_after")?,
+            ClosureConflictPageCoverage::RecordedSetExhausted { searched_domains } => {
+                if searched_domains.len() > MAX_OBSERVATION_REFS {
+                    return Err(ObservationValidationError::BoundsExceeded(
+                        "coverage.searched_domains",
+                    ));
+                }
+                let mut seen_domains = BTreeSet::new();
+                for domain in searched_domains {
+                    validate_name(&domain.chain_id, "searched_domains.chain_id")?;
+                    validate_name(&domain.network_id, "searched_domains.network_id")?;
+                    validate_native_hex(
+                        &domain.index_freshness.indexed_tip_block_id_hex,
+                        "searched_domains.indexed_tip_block_id_hex",
+                    )?;
+                    if !seen_domains
+                        .insert((domain.chain_id.as_str(), domain.network_id.as_str()))
+                    {
+                        return Err(ObservationValidationError::DuplicateReference(
+                            "searched_domains.chain_id",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The only closure-lineage version understood by this release.
+pub const CLOSURE_LINEAGE_VERSION: u16 = 1;
+
+/// How far a lineage walk follows reported linkage before stopping.
+///
+/// Bounded for the same reason the ancestry walk is: the linkage is
+/// source-reported, nothing stops a set of observations describing a cycle, and
+/// an unbounded walk over one would not terminate.
+pub const MAX_CLOSURE_LINEAGE_DEPTH: u32 = 64;
+
+/// Maximum steps one lineage answer carries.
+pub const MAX_CLOSURE_LINEAGE_STEPS: usize = 256;
+
+/// How much of the reported linkage a lineage walk covered.
+///
+/// Deliberately *not* [`ClosureAncestryCoverage`], which reads backwards from
+/// one observation toward the closures it descends from. This walk runs the
+/// other way, from a source state toward the successors attempted on it, and a
+/// shared name would invite a reader to take a forward answer as a statement
+/// about ancestry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "coverage", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClosureLineageCoverage {
+    /// Every reported successor was followed until no further closure was
+    /// observed on it.
+    Complete,
+    /// The walk stopped at its depth bound; closures beyond it are absent from
+    /// the answer.
+    TruncatedAtDepth {
+        /// The depth the walk reached before stopping.
+        depth: u32,
+    },
+    /// The walk stopped because one more step would exceed what one answer
+    /// carries. A wide stop is the ordinary shape of heavy equivocation, so it
+    /// is reported rather than trimmed to look complete.
+    TruncatedAtStepLimit {
+        /// The number of steps the answer carries.
+        steps: usize,
+    },
+}
+
+/// One observed closure on the walk from a source state toward its successors.
+///
+/// A step is a source's statement that this closure consumed `consumed_state`
+/// in favour of `successor_commitment_hex`. Two steps sharing one
+/// `consumed_state` with different successors are an observed conflict; the
+/// lineage shows it rather than resolving it, and
+/// [`ClosureConflictPageV1`] is the surface that enumerates such a set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosureLineageStepV1 {
+    /// Distance from the queried root state; the nearest step is 1.
+    pub depth: u32,
+    /// The state this step's closure was reported to consume.
+    pub consumed_state: ConsumedStateReading,
+    /// The observation that reported it.
+    pub observation_id: String,
+    /// The chain it was observed on.
+    pub chain_id: String,
+    /// The network within that chain.
+    pub network_id: String,
+    /// Registered closure family name.
+    pub closure_kind: String,
+    /// The chain-native single-use handle, hex-encoded.
+    pub closure_identity_hex: String,
+    /// The successor commitment this closure favours.
+    pub successor_commitment_hex: String,
+    /// Where the observation stands after the recorded reorganizations.
+    pub reorg_standing: ClosureReorgStanding,
+    /// What the observation still establishes, standing applied, in a stable
+    /// order. Never the stored set: a step on a replaced history must not report
+    /// settlement here any more than a direct read of it would.
+    pub established_states: Vec<ClosureObservationState>,
+    /// Outputs of `successor_commitment_hex` that a further closure was observed
+    /// to consume.
+    ///
+    /// This lists observed consumption and nothing else. An output missing here
+    /// is an output no source reported a closure for — which is not evidence
+    /// that it is unspent, only that this index has not seen it spent. The
+    /// successor's full output set is protocol state the observation plane does
+    /// not hold.
+    pub observed_consumed_outputs: Vec<ConsumedStateReading>,
+}
+
+/// The closures observed downstream of one source state.
+///
+/// The walk answers "what was attempted on this state, and what followed" — it
+/// is an investigator's trail, not an assurance result. Nothing in it concludes
+/// that a successor is valid, that a conflict has a winner, or that a state is
+/// unspent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosureLineageV1 {
+    /// Lineage version; see [`CLOSURE_LINEAGE_VERSION`].
+    pub schema_version: u16,
+    /// The state the walk started from.
+    pub root_state: ConsumedStateReading,
+    /// Steps in walk order: nearest first, then by observation identifier.
+    pub steps: Vec<ClosureLineageStepV1>,
+    /// How much of the reported linkage the walk covered. Read it before
+    /// reading the end of `steps` as the end of the lineage.
+    pub coverage: ClosureLineageCoverage,
+}
+
+impl ClosureLineageV1 {
+    /// A root state on which no closure was observed at all.
+    ///
+    /// An empty walk, not a claim that the state is unspent: this plane cannot
+    /// distinguish a state nobody has closed from one whose closure it has not
+    /// indexed.
+    #[must_use]
+    pub fn unobserved(root_state: ConsumedStateReading) -> Self {
+        Self {
+            schema_version: CLOSURE_LINEAGE_VERSION,
+            root_state,
+            steps: Vec::new(),
+            coverage: ClosureLineageCoverage::Complete,
+        }
+    }
+
+    /// Fail-closed validation for the storage and API boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObservationValidationError`] for an unsupported version, a
+    /// malformed identity, a step count over its bound, a depth outside the
+    /// walk's bound, a duplicated observation, or a step that establishes
+    /// nothing.
+    pub fn validate(&self) -> Result<(), ObservationValidationError> {
+        if self.schema_version != CLOSURE_LINEAGE_VERSION {
+            return Err(ObservationValidationError::UnsupportedVersion(
+                self.schema_version,
+            ));
+        }
+        self.root_state.validate()?;
+        if self.steps.len() > MAX_CLOSURE_LINEAGE_STEPS {
+            return Err(ObservationValidationError::BoundsExceeded("steps"));
+        }
+        let mut seen = BTreeSet::new();
+        for step in &self.steps {
+            if step.depth == 0 || step.depth > MAX_CLOSURE_LINEAGE_DEPTH {
+                return Err(ObservationValidationError::InvalidField("steps.depth"));
+            }
+            step.consumed_state.validate()?;
+            validate_name(&step.observation_id, "steps.observation_id")?;
+            validate_name(&step.chain_id, "steps.chain_id")?;
+            validate_name(&step.network_id, "steps.network_id")?;
+            validate_name(&step.closure_kind, "steps.closure_kind")?;
+            validate_native_hex(&step.closure_identity_hex, "steps.closure_identity_hex")?;
+            validate_hash_hex(
+                &step.successor_commitment_hex,
+                "steps.successor_commitment_hex",
+            )?;
+            step.reorg_standing.validate()?;
+            // Every recorded closure establishes at least `Observed`; an empty
+            // set would be a step that says a source reported nothing, which is
+            // not a thing a step can be.
+            if step.established_states.is_empty() {
+                return Err(ObservationValidationError::InvalidField(
+                    "steps.established_states",
+                ));
+            }
+            if step.observed_consumed_outputs.len() > MAX_OBSERVATION_REFS {
+                return Err(ObservationValidationError::BoundsExceeded(
+                    "steps.observed_consumed_outputs",
+                ));
+            }
+            for output in &step.observed_consumed_outputs {
+                output.validate()?;
+            }
+            if !seen.insert(step.observation_id.as_str()) {
+                return Err(ObservationValidationError::DuplicateReference(
+                    "steps.observation_id",
+                ));
+            }
+        }
+        if let ClosureLineageCoverage::TruncatedAtDepth { depth } = &self.coverage
+            && (*depth == 0 || *depth > MAX_CLOSURE_LINEAGE_DEPTH)
+        {
+            return Err(ObservationValidationError::InvalidField("coverage.depth"));
+        }
+        if let ClosureLineageCoverage::TruncatedAtStepLimit { steps } = &self.coverage
+            && *steps != self.steps.len()
+        {
+            return Err(ObservationValidationError::InvalidField("coverage.steps"));
+        }
+        Ok(())
     }
 }
 
@@ -2363,6 +2775,43 @@ mod closure_observation_tests {
         ));
     }
 
+    #[test]
+    fn a_declared_state_type_cannot_hide_a_conflict_over_one_output() {
+        // Both sources report a closure over output 0 of the same transition;
+        // they disagree only about the state type they say it had. That is a
+        // field this plane cannot check against any schema, so matching on it
+        // would let an equivocating reporter escape the search by changing it.
+        let first = fully_reported();
+        let mut second = fully_reported();
+        second.consumed_state.state_type = first.consumed_state.state_type + 1;
+        second.closure_identity.successor_commitment_hex = "33".repeat(32);
+
+        assert_ne!(second.consumed_state, first.consumed_state);
+        assert!(
+            second
+                .consumed_state
+                .identifies_same_output(&first.consumed_state)
+        );
+
+        let outcome = assess_closure_conflicts(
+            &first.consumed_state,
+            &first.closure_identity.successor_commitment_hex,
+            &[first.clone(), second],
+            &freshness(observed(100)),
+        );
+
+        let ClosureConflictSearchOutcome::CompetingClosuresObserved { competitors } = &outcome
+        else {
+            panic!("a differing declared state type must not hide a competing closure");
+        };
+        assert_eq!(competitors.len(), 1);
+        // The disagreement is carried, not flattened away by the match.
+        assert_eq!(
+            competitors[0].consumed_state_type,
+            first.consumed_state.state_type + 1
+        );
+    }
+
     // ── Reorganization standing (TUP-NE-004) ─────────────────────────────────
 
     fn retracted(reorg_id: &str) -> ClosureOrphaningReading {
@@ -2488,6 +2937,48 @@ mod closure_observation_tests {
         assert!(states.contains(&ClosureObservationState::Unknown));
         // But an ancestor's retraction is not this closure's revocation.
         assert!(!states.contains(&ClosureObservationState::Revoked));
+    }
+
+    #[test]
+    fn a_truncated_ancestry_walk_leaves_the_descent_unknown() {
+        let projection = fully_reported();
+        // No orphaned ancestor was found — but the walk stopped with linkage
+        // still to follow, so that is a statement about the search and not
+        // about the ancestry. A closure sixty-five links deep must not read
+        // exactly like one whose ancestry was walked to the end.
+        let standing = ClosureReorgStanding {
+            ancestry_coverage: ClosureAncestryCoverage::TruncatedAtDepth {
+                depth: MAX_CLOSURE_ANCESTRY_DEPTH,
+            },
+            ..ClosureReorgStanding::unaffected()
+        };
+        let states = established_states_under_reorg(&projection, &standing);
+
+        assert!(!standing.is_orphaned());
+        assert!(!standing.descends_from_orphaned());
+        assert!(states.contains(&ClosureObservationState::Unknown));
+        // Settlement stays: no reorganization was observed, and withdrawing it
+        // on a walk that merely ran long would fabricate one.
+        assert!(states.contains(&ClosureObservationState::Final));
+        assert!(!states.contains(&ClosureObservationState::Revoked));
+    }
+
+    #[test]
+    fn a_truncated_walk_over_an_orphaned_observation_still_withdraws_settlement() {
+        let projection = fully_reported();
+        let standing = ClosureReorgStanding {
+            ancestry_coverage: ClosureAncestryCoverage::TruncatedAtDepth {
+                depth: MAX_CLOSURE_ANCESTRY_DEPTH,
+            },
+            ..standing_with(vec![retracted("reorg-9")])
+        };
+        let states = established_states_under_reorg(&projection, &standing);
+
+        // The truncation rule adds doubt; it never returns settlement that an
+        // observed reorganization withdrew.
+        assert!(!states.contains(&ClosureObservationState::Final));
+        assert!(states.contains(&ClosureObservationState::Unknown));
+        assert!(states.contains(&ClosureObservationState::Revoked));
     }
 
     #[test]

@@ -50,6 +50,9 @@ pub fn rest_routes() -> Router<AppState> {
             get(handlers::observation_closure),
         )
         .route("/closure-observations", get(handlers::subject_closure))
+        // Investigation reads over the same recorded closures (TUP-NE-005).
+        .route("/closure-conflicts", get(handlers::closure_conflicts))
+        .route("/closure-lineage", get(handlers::closure_lineage))
         .route(
             "/observation-sources/health",
             get(handlers::observation_source_health),

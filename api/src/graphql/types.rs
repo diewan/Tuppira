@@ -394,6 +394,221 @@ impl From<tuppira_shared::SubjectClosureViewV1> for SubjectClosureProjectionV1Gq
     }
 }
 
+// ── Conflict and lineage queries (TUP-NE-005) ───────────────────────────────
+
+/// One closure competing for a consumed output under a different successor.
+///
+/// An observation, never a verdict. Two sources reporting different successors
+/// for one output is the equivocation this plane records; which of them is
+/// closure-valid is Parwana's verifier's answer and appears nowhere here.
+#[derive(SimpleObject, Clone)]
+#[graphql(name = "CompetingClosureGql")]
+pub struct CompetingClosureGql {
+    pub chain_id: String,
+    pub network_id: String,
+    pub closure_kind: String,
+    pub closure_identity_hex: String,
+    /// The successor this competitor favours, which is not the one searched for.
+    pub successor_commitment_hex: String,
+    /// The state type this competitor's source reported for the consumed output.
+    ///
+    /// Competitors are matched on the output's identity — the transition that
+    /// created it and its index — and not on this field, which no observation
+    /// plane can check against a schema. A value differing from the searched
+    /// one is two sources disagreeing about what they consumed.
+    pub consumed_state_type: i32,
+}
+
+/// Freshness of one chain-and-network index, as one term of a search bound.
+#[derive(SimpleObject, Clone)]
+#[graphql(name = "ClosureIndexDomainFreshnessGql")]
+pub struct ClosureIndexDomainFreshnessGql {
+    pub chain_id: String,
+    pub network_id: String,
+    pub index_freshness: IndexFreshnessGql,
+}
+
+/// One page of the closures competing for a consumed output.
+///
+/// Read `coverage` before reading an empty `competitors`. `more_pages_remain`
+/// means closures were left unread and their absence says nothing;
+/// `recorded_set_exhausted` means the page reached the end of what is recorded,
+/// bounded by `searched_domains`. Neither is a uniqueness claim: an index covers
+/// its chain only to the tip it has reached.
+#[derive(SimpleObject, Clone)]
+#[graphql(name = "ClosureConflictPageGql")]
+pub struct ClosureConflictPageGql {
+    pub schema_version: i32,
+    pub consumed_transition_id_hex: String,
+    pub consumed_output_index: i64,
+    /// The successor whose competitors were sought.
+    pub successor_commitment_hex: String,
+    pub competitors: Vec<CompetingClosureGql>,
+    /// `recorded_set_exhausted` or `more_pages_remain`.
+    pub coverage: String,
+    /// Freshness of every index the page relied on. Empty unless the coverage is
+    /// `recorded_set_exhausted`.
+    pub searched_domains: Vec<ClosureIndexDomainFreshnessGql>,
+    /// Cursor to resume after. Present only for `more_pages_remain`.
+    pub resume_after_observation_id: Option<String>,
+}
+
+impl From<tuppira_shared::ClosureConflictPageV1> for ClosureConflictPageGql {
+    fn from(value: tuppira_shared::ClosureConflictPageV1) -> Self {
+        let (coverage, searched_domains, resume_after_observation_id) = match value.coverage {
+            tuppira_shared::ClosureConflictPageCoverage::RecordedSetExhausted {
+                searched_domains,
+            } => (
+                "recorded_set_exhausted",
+                searched_domains
+                    .into_iter()
+                    .map(|domain| ClosureIndexDomainFreshnessGql {
+                        chain_id: domain.chain_id,
+                        network_id: domain.network_id,
+                        index_freshness: domain.index_freshness.into(),
+                    })
+                    .collect(),
+                None,
+            ),
+            tuppira_shared::ClosureConflictPageCoverage::MorePagesRemain {
+                resume_after_observation_id,
+            } => (
+                "more_pages_remain",
+                Vec::new(),
+                Some(resume_after_observation_id),
+            ),
+        };
+        Self {
+            schema_version: i32::from(value.schema_version),
+            consumed_transition_id_hex: value.consumed_state.transition_id_hex,
+            consumed_output_index: i64::from(value.consumed_state.output_index),
+            successor_commitment_hex: value.successor_commitment_hex,
+            competitors: value
+                .competitors
+                .into_iter()
+                .map(|competitor| CompetingClosureGql {
+                    chain_id: competitor.chain_id,
+                    network_id: competitor.network_id,
+                    closure_kind: competitor.closure_kind,
+                    closure_identity_hex: competitor.closure_identity_hex,
+                    successor_commitment_hex: competitor.successor_commitment_hex,
+                    consumed_state_type: i32::from(competitor.consumed_state_type),
+                })
+                .collect(),
+            coverage: coverage.to_string(),
+            searched_domains,
+            resume_after_observation_id,
+        }
+    }
+}
+
+/// One consumed output on a lineage walk.
+#[derive(SimpleObject, Clone)]
+#[graphql(name = "ClosureConsumedOutputGql")]
+pub struct ClosureConsumedOutputGql {
+    pub transition_id_hex: String,
+    pub output_index: i64,
+    /// The state type the reporting source declared for the output.
+    pub state_type: i32,
+}
+
+/// One observed closure on the walk from a source state toward its successors.
+#[derive(SimpleObject, Clone)]
+#[graphql(name = "ClosureLineageStepGql")]
+pub struct ClosureLineageStepGql {
+    /// Distance from the queried root state; the nearest step is `1`.
+    pub depth: i64,
+    pub observation_id: String,
+    pub chain_id: String,
+    pub network_id: String,
+    pub closure_kind: String,
+    pub closure_identity_hex: String,
+    /// The output this step's closure was reported to consume.
+    pub consumed_state: ClosureConsumedOutputGql,
+    /// The successor this closure favours.
+    pub successor_commitment_hex: String,
+    pub reorg_standing: ClosureReorgStandingGql,
+    /// What the observation still establishes, its standing applied. Never the
+    /// stored set: a step on a replaced history must not report settlement here
+    /// when a direct read of it would not.
+    pub established_states: Vec<String>,
+    /// Outputs of the successor a further closure was observed to consume.
+    ///
+    /// Observed consumption and nothing else. An output missing here is one no
+    /// source reported a closure for, which is not evidence it is unspent — only
+    /// that this index has not seen it spent.
+    pub observed_consumed_outputs: Vec<ClosureConsumedOutputGql>,
+}
+
+/// The closures observed downstream of one source state.
+///
+/// An investigator's trail, not an assurance result. Nothing in it concludes
+/// that a successor is valid, that a conflict has a winner, or that a state is
+/// unspent. An empty `steps` list means no closure was observed on the root, not
+/// that none exists.
+#[derive(SimpleObject, Clone)]
+#[graphql(name = "ClosureLineageGql")]
+pub struct ClosureLineageGql {
+    pub schema_version: i32,
+    pub root_state: ClosureConsumedOutputGql,
+    /// Steps in walk order: nearest first, then by observation identifier.
+    pub steps: Vec<ClosureLineageStepGql>,
+    /// `complete`, `truncated_at_depth`, or `truncated_at_step_limit`. Read it
+    /// before taking the end of `steps` for the end of the lineage.
+    pub coverage: String,
+    /// The depth the walk stopped at. Present only for `truncated_at_depth`.
+    pub coverage_depth: Option<i64>,
+}
+
+fn consumed_output(value: tuppira_shared::ConsumedStateReading) -> ClosureConsumedOutputGql {
+    ClosureConsumedOutputGql {
+        transition_id_hex: value.transition_id_hex,
+        output_index: i64::from(value.output_index),
+        state_type: i32::from(value.state_type),
+    }
+}
+
+impl From<tuppira_shared::ClosureLineageV1> for ClosureLineageGql {
+    fn from(value: tuppira_shared::ClosureLineageV1) -> Self {
+        let (coverage, coverage_depth) = match value.coverage {
+            tuppira_shared::ClosureLineageCoverage::Complete => ("complete", None),
+            tuppira_shared::ClosureLineageCoverage::TruncatedAtDepth { depth } => {
+                ("truncated_at_depth", Some(i64::from(depth)))
+            }
+            tuppira_shared::ClosureLineageCoverage::TruncatedAtStepLimit { .. } => {
+                ("truncated_at_step_limit", None)
+            }
+        };
+        Self {
+            schema_version: i32::from(value.schema_version),
+            root_state: consumed_output(value.root_state),
+            steps: value
+                .steps
+                .into_iter()
+                .map(|step| ClosureLineageStepGql {
+                    depth: i64::from(step.depth),
+                    observation_id: step.observation_id,
+                    chain_id: step.chain_id,
+                    network_id: step.network_id,
+                    closure_kind: step.closure_kind,
+                    closure_identity_hex: step.closure_identity_hex,
+                    consumed_state: consumed_output(step.consumed_state),
+                    successor_commitment_hex: step.successor_commitment_hex,
+                    reorg_standing: step.reorg_standing.into(),
+                    established_states: step.established_states.iter().map(state_name).collect(),
+                    observed_consumed_outputs: step
+                        .observed_consumed_outputs
+                        .into_iter()
+                        .map(consumed_output)
+                        .collect(),
+                })
+                .collect(),
+            coverage: coverage.to_string(),
+            coverage_depth,
+        }
+    }
+}
+
 /// Render an observation-plane enum using its own serde name.
 ///
 /// The wire name comes from the type's `snake_case` serde attribute rather than

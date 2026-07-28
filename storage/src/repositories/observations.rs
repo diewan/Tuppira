@@ -5,14 +5,19 @@ use std::collections::BTreeSet;
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use tuppira_shared::{
     CLOSURE_OBSERVATION_PROFILE_VERSION, ChainClosureEvidenceRecord, ClosureAncestryCoverage,
-    ClosureIndexTipRecord, ClosureObservationOrphaningRecord, ClosureObservationViewV1,
+    ClosureConflictPageCoverage, ClosureConflictPageV1, ClosureConflictSearchOutcome,
+    ClosureIndexDomainFreshness, ClosureIndexTipRecord, ClosureLineageCoverage, ClosureLineageStepV1,
+    ClosureLineageV1, ClosureObservationOrphaningRecord, ClosureObservationViewV1,
     ClosureOrphaningReading, ClosureProfileGeneration, ClosureReorgStanding, ClosureViewGeneration,
-    CollectionRunRecord, ContradictionHintRecord, MAX_CLOSURE_ANCESTRY_DEPTH, ObservationRecord,
-    ObservedOrMissing, OrphanedAncestorReading, OrphanedClosureDisposition, RawPayloadDescriptor,
-    RecordedSourceClosureObservationV1, ReorgRecord, Result, RetentionClassRecord,
-    RetractionStatus, SOURCE_CLOSURE_OBSERVATION_PROFILE_ID, SUBJECT_CLOSURE_PROFILE_VERSION,
+    CollectionRunRecord, CompetingClosureReading, ConsumedStateReading, ContradictionHintRecord,
+    MAX_CLOSURE_ANCESTRY_DEPTH, MAX_CLOSURE_CONFLICT_PAGE, MAX_CLOSURE_LINEAGE_DEPTH,
+    MAX_CLOSURE_LINEAGE_STEPS, ObservationRecord, ObservedOrMissing, OrphanedAncestorReading,
+    OrphanedClosureDisposition, RawPayloadDescriptor, RecordedSourceClosureObservationV1,
+    ReorgRecord, Result, RetentionClassRecord, RetractionStatus,
+    SOURCE_CLOSURE_OBSERVATION_PROFILE_ID, SUBJECT_CLOSURE_PROFILE_VERSION,
     SourceClosureObservationProjectionV1, SourceRecord, SubjectClosureProjectionV1,
     SubjectClosureViewV1, SyncCursorRecord, TenantVisibility, TuppiraError,
+    assess_closure_conflicts, established_states_under_reorg,
 };
 
 /// Observation-plane repository. Inserts validate at the typed boundary and
@@ -706,6 +711,325 @@ impl ObservationRepository {
             frontier = next;
         }
         Ok((ancestors, ClosureAncestryCoverage::Complete))
+    }
+
+    // ── Conflict and lineage queries (TUP-NE-005) ────────────────────────────
+
+    /// One page of the closures competing for a consumed output, tenant-filtered.
+    ///
+    /// This is the surface [`Self::subject_closure`] directs a heavily contested
+    /// subject to. That projection fails closed rather than truncate; this one
+    /// pages, because enumerating a conflict is exactly what an investigator
+    /// needs when a subject carries more closures than one account can report.
+    ///
+    /// Competitors are collected across every chain the index holds. A positive
+    /// finding is never withheld for being on another chain, and TUP-NE-003
+    /// normalized the closure identity precisely so cross-chain competitors
+    /// compare on identical terms. Detection itself is
+    /// [`assess_closure_conflicts`], called per chain and network with that
+    /// index's own freshness — this method is the query surface over it and not
+    /// a second implementation of the comparison.
+    ///
+    /// The negative is bounded rather than asserted:
+    /// [`ClosureConflictPageCoverage::RecordedSetExhausted`] carries the
+    /// freshness of every index domain the page relied on, because a search is
+    /// only as current as the laggiest index behind it.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on a malformed selector, on a stored payload that no longer
+    /// matches its digest, and when a chain carrying a closure has no recorded
+    /// index tip — a competitor set with no measurable bound would read as a
+    /// stronger result than it is.
+    pub async fn closure_conflicts(
+        &self,
+        consumed_state: &ConsumedStateReading,
+        successor_commitment_hex: &str,
+        resume_after_observation_id: Option<&str>,
+        tenant_id: &str,
+    ) -> Result<ClosureConflictPageV1> {
+        ensure_text(&consumed_state.transition_id_hex, "transition_id_hex")?;
+        ensure_text(successor_commitment_hex, "successor_commitment_hex")?;
+        ensure_text(tenant_id, "tenant_id")?;
+        if let Some(cursor) = resume_after_observation_id {
+            ensure_text(cursor, "resume_after_observation_id")?;
+        }
+
+        // One row over the page bound is fetched so "the page is full" and "more
+        // exists" stay distinguishable. Reporting a full page as exhausted would
+        // turn an unread remainder into an absence of competitors.
+        let rows = sqlx::query(
+            "SELECT c.observation_id, c.chain_id, c.network_id, c.projection_json, \
+             o.normalized_payload_digest \
+             FROM closure_observations c \
+             JOIN observations o ON o.observation_id = c.observation_id \
+             WHERE c.consumed_transition_id_hex = ? AND c.consumed_output_index = ? \
+               AND (o.visibility_scope = 'public' OR o.tenant_id = ?) \
+               AND (? IS NULL OR c.observation_id > ?) \
+             ORDER BY c.observation_id LIMIT ?",
+        )
+        .bind(&consumed_state.transition_id_hex)
+        .bind(i64::from(consumed_state.output_index))
+        .bind(tenant_id)
+        .bind(resume_after_observation_id)
+        .bind(resume_after_observation_id)
+        .bind(
+            i64::try_from(MAX_CLOSURE_CONFLICT_PAGE + 1)
+                .map_err(|_| invalid("conflict page bound exceeds SQLite range"))?,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let has_more = rows.len() > MAX_CLOSURE_CONFLICT_PAGE;
+        let page = &rows[..rows.len().min(MAX_CLOSURE_CONFLICT_PAGE)];
+        let mut last_observation_id = String::new();
+        // Grouped by index domain because that is the unit an
+        // `IndexFreshnessReading` describes: one chain's tip bounds only that
+        // chain's search.
+        let mut domains: Vec<(String, String, Vec<SourceClosureObservationProjectionV1>)> =
+            Vec::new();
+        for row in page {
+            last_observation_id = row.try_get("observation_id")?;
+            let chain_id: String = row.try_get("chain_id")?;
+            let network_id: String = row.try_get("network_id")?;
+            let payload: String = row.try_get("projection_json")?;
+            let expected = digest(
+                row.try_get("normalized_payload_digest")?,
+                "normalized_payload_digest",
+            )?;
+            let projection = decode_bound_closure_projection(&payload, expected)?;
+            match domains
+                .iter_mut()
+                .find(|(chain, network, _)| chain == &chain_id && network == &network_id)
+            {
+                Some((_, _, group)) => group.push(projection),
+                None => domains.push((chain_id, network_id, vec![projection])),
+            }
+        }
+
+        let mut competitors: Vec<CompetingClosureReading> = Vec::new();
+        let mut searched_domains: Vec<ClosureIndexDomainFreshness> = Vec::new();
+        for (chain_id, network_id, group) in &domains {
+            let tip = self.closure_index_tip(chain_id, network_id).await?;
+            // The lag is measured against this domain's own closures, so the
+            // bound reported is the one the search actually ran under.
+            let index_freshness = tip.freshness_for(
+                &group
+                    .first()
+                    .map(|projection| projection.observed_checkpoint.clone())
+                    .unwrap_or(ObservedOrMissing::Missing {
+                        reasons: vec!["no closure was read on this chain and network".to_string()],
+                    }),
+            );
+            if let ClosureConflictSearchOutcome::CompetingClosuresObserved {
+                competitors: found,
+            } = assess_closure_conflicts(
+                consumed_state,
+                successor_commitment_hex,
+                group,
+                &index_freshness,
+            ) {
+                for competitor in found {
+                    if !competitors.contains(&competitor) {
+                        competitors.push(competitor);
+                    }
+                }
+            }
+            searched_domains.push(ClosureIndexDomainFreshness {
+                chain_id: chain_id.clone(),
+                network_id: network_id.clone(),
+                index_freshness,
+            });
+        }
+
+        let coverage = if has_more {
+            ClosureConflictPageCoverage::MorePagesRemain {
+                resume_after_observation_id: last_observation_id,
+            }
+        } else {
+            ClosureConflictPageCoverage::RecordedSetExhausted { searched_domains }
+        };
+        let page = ClosureConflictPageV1 {
+            schema_version: tuppira_shared::CLOSURE_CONFLICT_PAGE_VERSION,
+            consumed_state: consumed_state.clone(),
+            successor_commitment_hex: successor_commitment_hex.to_string(),
+            competitors,
+            coverage,
+        };
+        page.validate()
+            .map_err(|error| invalid(&format!("invalid closure conflict page: {error:?}")))?;
+        Ok(page)
+    }
+
+    /// The closures observed downstream of one source state, tenant-filtered.
+    ///
+    /// Walks source state → attempted successors → closure observations →
+    /// outputs, breadth-first, following the linkage the sources themselves
+    /// reported. Tuppira does not decide whether any of that linkage is
+    /// protocol-valid: only Parwana's verifier can, and this walk is an
+    /// investigator's trail rather than an assurance result.
+    ///
+    /// Each step reports what its observation *still* establishes, with its
+    /// reorganization standing applied, so a step on a replaced history does not
+    /// report settlement here when a direct read of it would not.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on a malformed selector, on a stored payload that no longer
+    /// matches its digest, and for the same reasons
+    /// [`Self::closure_observation_view`] does.
+    pub async fn closure_lineage(
+        &self,
+        root_state: &ConsumedStateReading,
+        tenant_id: &str,
+    ) -> Result<ClosureLineageV1> {
+        ensure_text(&root_state.transition_id_hex, "transition_id_hex")?;
+        ensure_text(tenant_id, "tenant_id")?;
+
+        let mut steps: Vec<ClosureLineageStepV1> = Vec::new();
+        let mut visited: BTreeSet<String> = BTreeSet::new();
+        // Level 0 selects on the root output; every later level selects on a
+        // successor commitment and takes whichever of its outputs a source
+        // reported a closure for.
+        let mut frontier: Vec<(String, Option<u32>)> =
+            vec![(root_state.transition_id_hex.clone(), Some(root_state.output_index))];
+        let mut depth = 0_u32;
+        let mut coverage = ClosureLineageCoverage::Complete;
+
+        while !frontier.is_empty() {
+            let bound_reached = depth >= MAX_CLOSURE_LINEAGE_DEPTH;
+            let next_depth = depth + 1;
+            // The rows of the level below are read even when the walk will not
+            // turn them into steps. They are what fills the current steps'
+            // `observed_consumed_outputs`, and leaving that empty at the bound
+            // would say no consumption was observed when the walk simply
+            // stopped looking.
+            let mut children: Vec<ClosureLineageStepV1> = Vec::new();
+            let mut next_frontier: Vec<(String, Option<u32>)> = Vec::new();
+            for (transition_id_hex, output_index) in &frontier {
+                let rows = self
+                    .closure_rows_consuming(transition_id_hex, *output_index, tenant_id)
+                    .await?;
+                for (observation_id, payload, expected) in rows {
+                    if !visited.insert(observation_id.clone()) {
+                        continue;
+                    }
+                    let projection = decode_bound_closure_projection(&payload, expected)?;
+                    // Attribute the output to the step that named this
+                    // successor, which is what makes the edge readable without
+                    // the caller re-joining on transition identifiers.
+                    if let Some(parent) = steps.iter().position(|step: &ClosureLineageStepV1| {
+                        step.successor_commitment_hex == *transition_id_hex
+                    }) && !steps[parent]
+                        .observed_consumed_outputs
+                        .contains(&projection.consumed_state)
+                    {
+                        steps[parent]
+                            .observed_consumed_outputs
+                            .push(projection.consumed_state.clone());
+                    }
+                    if bound_reached {
+                        continue;
+                    }
+                    let standing = self
+                        .reorg_standing_for(
+                            &observation_id,
+                            &projection.consumed_state.transition_id_hex,
+                            tenant_id,
+                        )
+                        .await?;
+                    let established_states =
+                        established_states_under_reorg(&projection, &standing)
+                            .into_iter()
+                            .collect();
+                    let successor = projection.closure_identity.successor_commitment_hex.clone();
+                    children.push(ClosureLineageStepV1 {
+                        depth: next_depth,
+                        consumed_state: projection.consumed_state.clone(),
+                        observation_id,
+                        chain_id: projection.chain_id.clone(),
+                        network_id: projection.network_id.clone(),
+                        closure_kind: projection.closure_identity.closure_kind.clone(),
+                        closure_identity_hex: projection
+                            .closure_identity
+                            .closure_identity_hex
+                            .clone(),
+                        successor_commitment_hex: successor.clone(),
+                        reorg_standing: standing,
+                        established_states,
+                        observed_consumed_outputs: Vec::new(),
+                    });
+                    if !next_frontier
+                        .iter()
+                        .any(|(transition, _)| transition == &successor)
+                    {
+                        next_frontier.push((successor, None));
+                    }
+                }
+            }
+            if bound_reached {
+                coverage = ClosureLineageCoverage::TruncatedAtDepth { depth };
+                break;
+            }
+            if steps.len() + children.len() > MAX_CLOSURE_LINEAGE_STEPS {
+                // A wide stop is the ordinary shape of heavy equivocation.
+                // Trimming to the bound and reporting `Complete` would present
+                // the busiest lineage as the tidiest one.
+                coverage = ClosureLineageCoverage::TruncatedAtStepLimit { steps: steps.len() };
+                break;
+            }
+            steps.extend(children);
+            frontier = next_frontier;
+            depth = next_depth;
+        }
+
+        let lineage = ClosureLineageV1 {
+            schema_version: tuppira_shared::CLOSURE_LINEAGE_VERSION,
+            root_state: root_state.clone(),
+            steps,
+            coverage,
+        };
+        lineage
+            .validate()
+            .map_err(|error| invalid(&format!("invalid closure lineage: {error:?}")))?;
+        Ok(lineage)
+    }
+
+    /// Tenant-visible closure rows consuming one output, or any output of one
+    /// transition when `output_index` is `None`.
+    async fn closure_rows_consuming(
+        &self,
+        transition_id_hex: &str,
+        output_index: Option<u32>,
+        tenant_id: &str,
+    ) -> Result<Vec<(String, String, [u8; 32])>> {
+        let rows = sqlx::query(
+            "SELECT c.observation_id, c.projection_json, o.normalized_payload_digest \
+             FROM closure_observations c \
+             JOIN observations o ON o.observation_id = c.observation_id \
+             WHERE c.consumed_transition_id_hex = ? \
+               AND (? IS NULL OR c.consumed_output_index = ?) \
+               AND (o.visibility_scope = 'public' OR o.tenant_id = ?) \
+             ORDER BY c.observation_id",
+        )
+        .bind(transition_id_hex)
+        .bind(output_index.map(i64::from))
+        .bind(output_index.map(i64::from))
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get("observation_id")?,
+                    row.try_get("projection_json")?,
+                    digest(
+                        row.try_get("normalized_payload_digest")?,
+                        "normalized_payload_digest",
+                    )?,
+                ))
+            })
+            .collect()
     }
 
     /// The chain evidence behind one normalized closure, tenant-filtered.
@@ -2746,6 +3070,359 @@ mod tests {
         assert!(matches!(
             repository.closure_index_tip("solana", "mainnet").await,
             Err(TuppiraError::NotFound { .. })
+        ));
+    }
+
+    // ── Conflict and lineage queries (TUP-NE-005) ────────────────────────────
+
+    /// Append a closure consuming `(consumed_transition, output_index)` and
+    /// favouring `successor`, under `observation_id`.
+    async fn append_link(
+        repository: &ObservationRepository,
+        observation_id: &str,
+        consumed_transition: &str,
+        output_index: u32,
+        successor: &str,
+        identity_hex: &str,
+        observed_at: u64,
+    ) -> SourceClosureObservationProjectionV1 {
+        let mut projection = closure_projection();
+        projection.consumed_state.transition_id_hex = consumed_transition.into();
+        projection.consumed_state.output_index = output_index;
+        projection.closure_identity.successor_commitment_hex = successor.into();
+        projection.closure_identity.closure_identity_hex = identity_hex.into();
+        let record = closure_observation_record(observation_id, "sanad:1", &projection);
+        if let Err(error) = repository
+            .append_closure_observation(&record, &projection, None, &cursor(observed_at))
+            .await
+        {
+            panic!("append {observation_id}: {error:?}");
+        }
+        projection
+    }
+
+    fn root_of(projection: &SourceClosureObservationProjectionV1) -> ConsumedStateReading {
+        projection.consumed_state.clone()
+    }
+
+    #[tokio::test]
+    async fn a_lineage_walk_reaches_successors_and_the_outputs_observed_consumed() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let first = append_link(
+            &repository,
+            "obs:closure:a",
+            &"11".repeat(32),
+            0,
+            &"22".repeat(32),
+            "0a01",
+            12,
+        )
+        .await;
+        append_link(
+            &repository,
+            "obs:closure:b",
+            &"22".repeat(32),
+            0,
+            &"33".repeat(32),
+            "0a02",
+            13,
+        )
+        .await;
+
+        let Ok(lineage) = repository
+            .closure_lineage(&root_of(&first), "tenant:acme")
+            .await
+        else {
+            panic!("the lineage of an observed root state must be readable");
+        };
+        assert_eq!(lineage.coverage, ClosureLineageCoverage::Complete);
+        assert_eq!(lineage.steps.len(), 2);
+        assert_eq!(lineage.steps[0].observation_id, "obs:closure:a");
+        assert_eq!(lineage.steps[0].depth, 1);
+        assert_eq!(lineage.steps[1].observation_id, "obs:closure:b");
+        assert_eq!(lineage.steps[1].depth, 2);
+        // The "→ outputs" leg: the first step names the output of its successor
+        // that a further closure was observed to consume, so the edge is
+        // readable without re-joining on transition identifiers.
+        assert_eq!(
+            lineage.steps[0].observed_consumed_outputs,
+            vec![lineage.steps[1].consumed_state.clone()]
+        );
+        // Nothing further was observed on the second step's successor. That is
+        // an absence of observation, not evidence the output is unspent.
+        assert!(lineage.steps[1].observed_consumed_outputs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_root_state_with_no_observed_closure_is_an_empty_walk_not_a_claim() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let root = ConsumedStateReading {
+            transition_id_hex: "ab".repeat(32),
+            output_index: 3,
+            state_type: 1,
+        };
+        let Ok(lineage) = repository.closure_lineage(&root, "tenant:acme").await else {
+            panic!("an unobserved root state is a readable empty walk");
+        };
+        assert!(lineage.steps.is_empty());
+        assert_eq!(lineage.root_state, root);
+        // No variant of the answer says "unspent", and none may be added: this
+        // plane cannot distinguish a state nobody closed from one whose closure
+        // it has not indexed.
+        let encoded = serde_json::to_value(&lineage).expect("serialize");
+        let text = encoded.to_string().to_ascii_lowercase();
+        assert!(!text.contains("unspent"));
+        assert!(!text.contains("valid"));
+    }
+
+    #[tokio::test]
+    async fn a_lineage_step_reports_what_its_standing_leaves_established() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let first = append_link(
+            &repository,
+            "obs:closure:a",
+            &"11".repeat(32),
+            0,
+            &"22".repeat(32),
+            "0a01",
+            12,
+        )
+        .await;
+        add_reorg(&repository, "reorg:closure:1", "source:piteka").await;
+        assert!(
+            repository
+                .record_closure_orphaning(&retraction("reorg:closure:1", "obs:closure:a"))
+                .await
+                .is_ok()
+        );
+
+        let Ok(lineage) = repository
+            .closure_lineage(&root_of(&first), "tenant:acme")
+            .await
+        else {
+            panic!("an orphaned closure is still readable exactly as recorded");
+        };
+        let step = &lineage.steps[0];
+        // A step on a replaced history must not report settlement here when a
+        // direct read of the same observation would not.
+        assert!(!step.established_states.contains(&ClosureObservationState::Final));
+        assert!(step.established_states.contains(&ClosureObservationState::Unknown));
+        assert!(step.established_states.contains(&ClosureObservationState::Revoked));
+        assert!(step.reorg_standing.is_orphaned());
+    }
+
+    #[tokio::test]
+    async fn the_lineage_walk_stays_inside_the_tenant_boundary() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let first = append_link(
+            &repository,
+            "obs:closure:a",
+            &"11".repeat(32),
+            0,
+            &"22".repeat(32),
+            "0a01",
+            12,
+        )
+        .await;
+        let mut hidden = closure_projection();
+        hidden.consumed_state.transition_id_hex = "22".repeat(32);
+        hidden.closure_identity.successor_commitment_hex = "33".repeat(32);
+        hidden.closure_identity.closure_identity_hex = "0a02".into();
+        let mut record = closure_observation_record("obs:closure:hidden", "sanad:2", &hidden);
+        record.tenant_visibility = TenantVisibility::Tenant {
+            tenant_id: "tenant:other".into(),
+        };
+        assert!(
+            repository
+                .append_closure_observation(&record, &hidden, None, &cursor(13))
+                .await
+                .is_ok()
+        );
+
+        let Ok(lineage) = repository
+            .closure_lineage(&root_of(&first), "tenant:acme")
+            .await
+        else {
+            panic!("the reading tenant sees its own root");
+        };
+        // The same trade-off the ancestry walk makes, in the other direction:
+        // another tenant's closure is neither walked nor named, so the trail
+        // stops short rather than disclosing that it exists.
+        assert_eq!(lineage.steps.len(), 1);
+        assert!(lineage.steps[0].observed_consumed_outputs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_conflict_page_reports_competitors_as_observations_and_not_a_verdict() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let first = append_link(
+            &repository,
+            "obs:closure:a",
+            &"11".repeat(32),
+            0,
+            &"22".repeat(32),
+            "0a01",
+            12,
+        )
+        .await;
+        append_link(
+            &repository,
+            "obs:closure:b",
+            &"11".repeat(32),
+            0,
+            &"33".repeat(32),
+            "0a02",
+            13,
+        )
+        .await;
+
+        let Ok(page) = repository
+            .closure_conflicts(
+                &root_of(&first),
+                &first.closure_identity.successor_commitment_hex,
+                None,
+                "tenant:acme",
+            )
+            .await
+        else {
+            panic!("a contested consumed output must be enumerable");
+        };
+        assert_eq!(page.competitors.len(), 1);
+        assert_eq!(page.competitors[0].successor_commitment_hex, "33".repeat(32));
+        // The page reached the end of the recorded set, and says what bounded
+        // it. Neither the type nor this answer picks a winner.
+        let ClosureConflictPageCoverage::RecordedSetExhausted { searched_domains } = &page.coverage
+        else {
+            panic!("both closures were read, so the recorded set was exhausted");
+        };
+        assert_eq!(searched_domains.len(), 1);
+        assert_eq!(searched_domains[0].chain_id, "ethereum");
+        let text = serde_json::to_value(&page)
+            .expect("serialize")
+            .to_string()
+            .to_ascii_lowercase();
+        assert!(!text.contains("unique"));
+        assert!(!text.contains("winner"));
+        assert!(!text.contains("verdict"));
+    }
+
+    #[tokio::test]
+    async fn a_full_conflict_page_says_more_remain_rather_than_reading_as_exhausted() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let root = &"11".repeat(32);
+        // One more closure than a page holds, so the last one cannot fit.
+        for index in 1..=(MAX_CLOSURE_CONFLICT_PAGE + 1) {
+            append_link(
+                &repository,
+                &format!("obs:closure:{index:04}"),
+                root,
+                0,
+                // Never all-zero: a zero commitment is not a commitment, and
+                // the projection rejects one.
+                &format!("{index:064x}"),
+                &format!("{index:04x}"),
+                12 + index as u64,
+            )
+            .await;
+        }
+
+        let searched = ConsumedStateReading {
+            transition_id_hex: root.clone(),
+            output_index: 0,
+            state_type: 1,
+        };
+        let Ok(page) = repository
+            .closure_conflicts(&searched, &"ff".repeat(32), None, "tenant:acme")
+            .await
+        else {
+            panic!("a heavily contested output must page rather than fail");
+        };
+        assert_eq!(page.competitors.len(), MAX_CLOSURE_CONFLICT_PAGE);
+        // A full page is not an exhausted set. Reporting it as one would turn
+        // the unread remainder into an absence of competitors.
+        let ClosureConflictPageCoverage::MorePagesRemain {
+            resume_after_observation_id,
+        } = &page.coverage
+        else {
+            panic!("a full page must say that closures were left unread");
+        };
+
+        let Ok(next) = repository
+            .closure_conflicts(
+                &searched,
+                &"ff".repeat(32),
+                Some(resume_after_observation_id),
+                "tenant:acme",
+            )
+            .await
+        else {
+            panic!("the cursor must resume the search");
+        };
+        assert_eq!(next.competitors.len(), 1);
+        assert!(matches!(
+            next.coverage,
+            ClosureConflictPageCoverage::RecordedSetExhausted { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_conflict_page_does_not_disclose_another_tenants_closure() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        let first = append_link(
+            &repository,
+            "obs:closure:a",
+            &"11".repeat(32),
+            0,
+            &"22".repeat(32),
+            "0a01",
+            12,
+        )
+        .await;
+        let mut hidden = closure_projection();
+        hidden.closure_identity.successor_commitment_hex = "33".repeat(32);
+        hidden.closure_identity.closure_identity_hex = "0a02".into();
+        let mut record = closure_observation_record("obs:closure:hidden", "sanad:2", &hidden);
+        record.tenant_visibility = TenantVisibility::Tenant {
+            tenant_id: "tenant:other".into(),
+        };
+        assert!(
+            repository
+                .append_closure_observation(&record, &hidden, None, &cursor(13))
+                .await
+                .is_ok()
+        );
+
+        let Ok(page) = repository
+            .closure_conflicts(
+                &root_of(&first),
+                &first.closure_identity.successor_commitment_hex,
+                None,
+                "tenant:acme",
+            )
+            .await
+        else {
+            panic!("the reading tenant sees its own closure");
+        };
+        assert!(page.competitors.is_empty());
+        // And the reading tenant is not told that something was hidden, only
+        // what the index it may read covers.
+        assert!(matches!(
+            page.coverage,
+            ClosureConflictPageCoverage::RecordedSetExhausted { .. }
         ));
     }
 }
