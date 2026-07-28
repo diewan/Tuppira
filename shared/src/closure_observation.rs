@@ -1590,6 +1590,14 @@ pub enum ClosureConflictPageCoverage {
     /// [`ClosureConflictSearchOutcome`], which refuses a `Unique` variant for
     /// the same reason. An empty list means the page read no closure at all,
     /// which bounds nothing and is weaker than any lag.
+    ///
+    /// `searched_domains` bounds **this page**, not every page of a resumed
+    /// search. A page is read from a cursor and cannot see the domains an
+    /// earlier one ran against, so a caller that paged to get here holds the
+    /// bound of a search only after taking the union across the pages it read —
+    /// and, on the same "laggiest index" rule, the laggiest reading in that
+    /// union. Reading the last page's domains as the whole search's bound would
+    /// drop exactly the stale index that most weakens the answer.
     RecordedSetExhausted {
         /// Freshness of every index domain the page relied on.
         searched_domains: Vec<ClosureIndexDomainFreshness>,
@@ -1664,9 +1672,22 @@ impl ClosureConflictPageV1 {
                     "competitors.successor_commitment_hex",
                 ));
             }
+            // The key is the whole reading, because that is what makes one
+            // competitor a repeat of another. A narrower key rejects the very
+            // finding this page exists to carry: `SourceNullifier` is derived
+            // from the consumed state and nothing else, so one handle is what
+            // appears wherever the source was closed, and two closures sharing
+            // it while favouring different successors are the equivocation —
+            // whether they sit on two networks of one chain or on one registry
+            // that admitted both. Refusing to render the page would take a
+            // conflict the index holds and make it unreadable.
             if !seen.insert((
                 competitor.chain_id.as_str(),
+                competitor.network_id.as_str(),
+                competitor.closure_kind.as_str(),
                 competitor.closure_identity_hex.as_str(),
+                competitor.successor_commitment_hex.as_str(),
+                competitor.consumed_state_type,
             )) {
                 return Err(ObservationValidationError::DuplicateReference(
                     "competitors.closure_identity_hex",
@@ -2810,6 +2831,72 @@ mod closure_observation_tests {
             competitors[0].consumed_state_type,
             first.consumed_state.state_type + 1
         );
+    }
+
+    /// A competitor's identity is the closure it names, not the handle alone.
+    fn competitor(network_id: &str, identity_hex: &str, successor: &str) -> CompetingClosureReading {
+        CompetingClosureReading {
+            chain_id: "ethereum".to_string(),
+            network_id: network_id.to_string(),
+            closure_kind: "evm-nullifier".to_string(),
+            closure_identity_hex: identity_hex.to_string(),
+            successor_commitment_hex: successor.to_string(),
+            consumed_state_type: 1,
+        }
+    }
+
+    fn page_of(competitors: Vec<CompetingClosureReading>) -> ClosureConflictPageV1 {
+        ClosureConflictPageV1 {
+            schema_version: CLOSURE_CONFLICT_PAGE_VERSION,
+            consumed_state: ConsumedStateReading {
+                transition_id_hex: "11".repeat(32),
+                output_index: 0,
+                state_type: 1,
+            },
+            successor_commitment_hex: "22".repeat(32),
+            competitors,
+            coverage: ClosureConflictPageCoverage::RecordedSetExhausted {
+                searched_domains: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn one_handle_claimed_for_two_successors_is_a_readable_page_not_a_rejected_one() {
+        // `SourceNullifier` is derived from the consumed state and nothing else,
+        // so the same handle appears wherever the source was closed — that is
+        // what makes the equivocation portable and detectable at all. Two
+        // networks of one chain therefore carry one identity and two
+        // successors, and so does one registry that admitted both.
+        let cross_network = page_of(vec![
+            competitor("mainnet", "0a01", &"33".repeat(32)),
+            competitor("sepolia", "0a01", &"44".repeat(32)),
+        ]);
+        assert!(
+            cross_network.validate().is_ok(),
+            "a conflict spanning two networks of one chain must be readable"
+        );
+
+        let one_domain = page_of(vec![
+            competitor("mainnet", "0a01", &"33".repeat(32)),
+            competitor("mainnet", "0a01", &"44".repeat(32)),
+        ]);
+        assert!(
+            one_domain.validate().is_ok(),
+            "one handle claimed for two successors is the equivocation to show, not to refuse"
+        );
+    }
+
+    #[test]
+    fn a_competitor_repeated_verbatim_is_still_rejected() {
+        let padded = page_of(vec![
+            competitor("mainnet", "0a01", &"33".repeat(32)),
+            competitor("mainnet", "0a01", &"33".repeat(32)),
+        ]);
+        assert!(matches!(
+            padded.validate(),
+            Err(ObservationValidationError::DuplicateReference(_))
+        ));
     }
 
     // ── Reorganization standing (TUP-NE-004) ─────────────────────────────────

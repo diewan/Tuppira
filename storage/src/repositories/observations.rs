@@ -911,22 +911,34 @@ impl ObservationRepository {
                     .closure_rows_consuming(transition_id_hex, *output_index, tenant_id)
                     .await?;
                 for (observation_id, payload, expected) in rows {
-                    if !visited.insert(observation_id.clone()) {
-                        continue;
-                    }
                     let projection = decode_bound_closure_projection(&payload, expected)?;
-                    // Attribute the output to the step that named this
+                    // Attribute the output to *every* step that named this
                     // successor, which is what makes the edge readable without
                     // the caller re-joining on transition identifiers.
-                    if let Some(parent) = steps.iter().position(|step: &ClosureLineageStepV1| {
-                        step.successor_commitment_hex == *transition_id_hex
-                    }) && !steps[parent]
-                        .observed_consumed_outputs
-                        .contains(&projection.consumed_state)
+                    //
+                    // Every one of them, and before the visited check, because
+                    // an empty `observed_consumed_outputs` says no source
+                    // reported a closure for any output of that successor.
+                    // Two sources reporting one closure are two steps naming
+                    // one successor, and a closure reached from two branches is
+                    // read once; attributing to the first step only, or
+                    // skipping attribution on the second reading, would leave
+                    // the other steps saying that of a consumption this walk
+                    // has in hand.
+                    for step in steps
+                        .iter_mut()
+                        .filter(|step| step.successor_commitment_hex == *transition_id_hex)
                     {
-                        steps[parent]
+                        if !step
                             .observed_consumed_outputs
-                            .push(projection.consumed_state.clone());
+                            .contains(&projection.consumed_state)
+                        {
+                            step.observed_consumed_outputs
+                                .push(projection.consumed_state.clone());
+                        }
+                    }
+                    if !visited.insert(observation_id.clone()) {
+                        continue;
                     }
                     if bound_reached {
                         continue;
@@ -3153,6 +3165,78 @@ mod tests {
         // Nothing further was observed on the second step's successor. That is
         // an absence of observation, not evidence the output is unspent.
         assert!(lineage.steps[1].observed_consumed_outputs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn every_step_naming_a_successor_reports_the_consumption_observed_on_it() {
+        let Ok(repository) = repository().await else {
+            return;
+        };
+        // Two sources report the same closure: one consumed output, one
+        // favoured successor, two observations. They are not competitors —
+        // `assess_closure_conflicts` calls this the same closure seen again —
+        // and a multi-source observation plane records both.
+        let first = append_link(
+            &repository,
+            "obs:closure:a",
+            &"11".repeat(32),
+            0,
+            &"22".repeat(32),
+            "0a01",
+            12,
+        )
+        .await;
+        append_link(
+            &repository,
+            "obs:closure:b",
+            &"11".repeat(32),
+            0,
+            &"22".repeat(32),
+            "0a02",
+            13,
+        )
+        .await;
+        // One further closure consumes an output of that shared successor.
+        append_link(
+            &repository,
+            "obs:closure:c",
+            &"22".repeat(32),
+            0,
+            &"33".repeat(32),
+            "0a03",
+            14,
+        )
+        .await;
+
+        let Ok(lineage) = repository
+            .closure_lineage(&root_of(&first), "tenant:acme")
+            .await
+        else {
+            panic!("the lineage of an observed root state must be readable");
+        };
+        let downstream = lineage
+            .steps
+            .iter()
+            .find(|step| step.observation_id == "obs:closure:c")
+            .map(|step| step.consumed_state.clone())
+            .expect("the further closure is a step of the walk");
+
+        // Both steps name the same successor, so the consumption observed on
+        // that successor's output was observed on *both* of their successors.
+        // An empty list here says no source reported a closure for any output
+        // of this step's successor, which is false for either of them.
+        for step in lineage
+            .steps
+            .iter()
+            .filter(|step| step.successor_commitment_hex == "22".repeat(32))
+        {
+            assert_eq!(
+                step.observed_consumed_outputs,
+                vec![downstream.clone()],
+                "step {} reports no observed consumption of its successor's outputs",
+                step.observation_id
+            );
+        }
     }
 
     #[tokio::test]
