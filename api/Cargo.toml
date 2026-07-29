@@ -3,10 +3,15 @@ name = "tuppira-api"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+default-run = "tuppira-api"
 
 [[bin]]
 name = "tuppira-api"
 path = "src/main.rs"
+
+[[bin]]
+name = "org-rel-003-campaign-gate"
+path = "src/bin/org_rel_003_campaign_gate.rs"
 
 [lints]
 workspace = true
