@@ -8,11 +8,12 @@ when it is absent, observation endpoints fail closed with HTTP 503. Ordinary
 observation responses expose normalized projections and lineage only—never raw
 bytes, custody locators, or raw-payload digests.
 
-Tuppira is the **indexer for the Parwana protocol** — built entirely in Rust.
+Tuppira is the **observation and lineage plane for the Parwana protocol** —
+built entirely in Rust.
 
 It is deliberately *not* an all-in-one block explorer. Tuppira traces only the
-transactions, contracts, and accounts that belong to Parwana (CSV — Cross-Chain
-Sealed Verifiable — sanads, seals, transfers, and contracts). For any
+transactions, contracts, and accounts that belong to Parwana (CSV —
+Client-Side Validation — sanads, seals, transfers, and contracts). For any
 visualization deeper than that protocol-scoped data, it links out to each
 chain's **official** block explorer rather than reproducing it, fetching only
 the data Parwana needs. This keeps the focus on the protocol instead of chasing
@@ -56,7 +57,7 @@ Key terms a newcomer will meet in Tuppira:
 
 | Term | Kind | Plain-English meaning | Real-world example |
 |------|------|-----------------------|--------------------|
-| CSV (Cross-Chain Sealed Verifiable) | Keyword | The Parwana protocol data Tuppira traces — sanads, seals, transfers, and contracts — validated client-side. | The specific "shipments" this tracker follows, ignoring everything else on the chain. |
+| CSV (Client-Side Validation) | Keyword | Clients verify protocol meaning locally from proof-carrying state; Tuppira only observes and indexes the evidence made visible to it. | A tracker files shipment events while the recipient independently checks the sealed documents. |
 | Sanad | Data structure | Parwana's proof-carrying ownership instrument; stored by Tuppira as `SanadRecord`. | A property deed that carries its own chain of proof. |
 | Seal | Data structure | A consumable ownership condition closed exactly once; stored as `SealRecord`. | A tamper-evident seal: once broken, it can't be reused. |
 | Transfer | Data structure | A state transition moving ownership; stored as `TransferRecord`. | Endorsing a cheque over to a new payee. |
@@ -84,6 +85,11 @@ tuppira/
 - **Storage** - SQLite database with typed repositories for all entity types, sync progress tracking, and aggregate statistics
 - **Indexer** - Chain-agnostic indexing daemon with pluggable `ChainIndexer` trait implementations for Bitcoin, Ethereum, Sui, Aptos, and Solana
 - **API** - GraphQL API (primary) + REST API (secondary) for querying the indexed Parwana data, with pagination and filtering
+
+V2 closure observations distinguish `observed`, `verified elsewhere`, `final`,
+`revoked`, and `unknown`; preserve raw-evidence references and freshness; and
+expose attempted successors, conflicts, reorg standing, and lineage without
+selecting a protocol winner.
 
 ## Quick Start
 
